@@ -160,3 +160,23 @@ def test_result_json_is_valid(client, downloaded):
     job = fix(client, pressure, query="Saltmarsh - Pressure")
     assert json.dumps(job["result"]) and job["result"]["title"] == SET_NAME
     assert FIXTURE.exists()
+
+
+def test_likely_matches_for_a_missing_track(client, downloaded, tmp_path):
+    pressure = row(tracks(client), "Pressure")
+    data = client.ok("POST", f"/api/sets/{SET}/tracks/{pressure['row']}/suggest", {"identity": pressure["identity"]})
+    job = client.wait_job(data["job"]["id"])
+    assert job["state"] == "done", job
+    assert job["kind"] == "suggest" and job["row"] == pressure["row"]
+    found = job["result"]["tracks"][0]["candidates"]
+    assert found and {"score", "confidence", "reasons", "query", "link"} <= set(found[0])
+    # Listing them takes nothing
+    assert row(tracks(client), "Pressure")["status"] == "missing"
+
+
+def test_find_renamed_tracks_takes_the_sure_ones(client, downloaded, tmp_path):
+    job = client.wait_job(client.ok("POST", f"/api/sets/{SET}/suggest")["job"]["id"])
+    assert job["state"] == "done", job
+    assert job["message"] == "Found 1 of 1 missing track(s) under other names."
+    after = row(tracks(client), "Pressure")
+    assert after["status"] == "found" and after["fix"]["source"] == "soulseek"

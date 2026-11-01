@@ -78,6 +78,8 @@ ROUTES = [
     ("GET", r"/api/sets/([^/]+)", "get_set"),
     ("GET", r"/api/sets/([^/]+)/tracks", "get_tracks"),
     ("POST", r"/api/sets/([^/]+)/tracks/([0-9]{1,6})/fix", "post_fix"),
+    ("POST", r"/api/sets/([^/]+)/tracks/([0-9]{1,6})/suggest", "post_suggest_track"),
+    ("POST", r"/api/sets/([^/]+)/suggest", "post_suggest_missing"),
     ("POST", r"/api/searches", "post_search"),
     ("POST", r"/api/uploads", "post_upload"),
     ("DELETE", r"/api/uploads/([^/]+)", "delete_upload"),
@@ -381,6 +383,20 @@ class Handler(BaseHTTPRequestHandler):
         app = self.server.app
         job = app.start_fix(set_id, n, body.get("identity"), link=body.get("link"), query=body.get("query"),
                             upload=body.get("upload"), clear=body.get("clear", False))
+        self._send_json(202, {"job": app.jobs.snapshot(job)})
+
+    def post_suggest_track(self, set_id: str, row: str) -> None:
+        body = self._json()
+        n = int(row)
+        if not 1 <= n <= MAX_ROW:
+            raise bad_request("row is the track's row number.", "bad_row")
+        app = self.server.app
+        job = app.start_suggest(set_id, n, body.get("identity"))
+        self._send_json(202, {"job": app.jobs.snapshot(job)})
+
+    def post_suggest_missing(self, set_id: str) -> None:
+        app = self.server.app
+        job = app.start_suggest(set_id)
         self._send_json(202, {"job": app.jobs.snapshot(job)})
 
     def post_search(self) -> None:

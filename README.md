@@ -8,6 +8,19 @@ retry what's missing and fix single tracks: search again, pick a result, or use 
 the window around them: a Python backend (`setdl/`) serving a web UI (`web/`) in a pywebview window.
 The API is described in [API.md](API.md).
 
+## Missing tracks
+
+A track can be missing because its file is named differently on Soulseek: a Soulseek search only
+finds files whose path has every word searched for, so "ft. Guest" or "(Remixer Remix)" can hide a
+file that is there. **Find renamed tracks** (on a set) and **Find likely matches** (in a track's Fix
+panel) try a ladder of broader searches (without the featured artists, the remixer as the artist,
+artist and title, the title alone, a wildcard past filtered names) in one Soulseek session, then
+score every file found on its title, artist, version (the right remix, edit or acappella), length
+and quality (tl2mixxx's `match.py`, `tl2mixxx suggest`). Files that surely are the track are
+downloaded and kept as its fix (Undo still works); the rest are listed, with why, for you to pick.
+A plain retry also searches harder for what's still missing (sockseek's `--remove-ft`,
+`--artist-maybe-wrong`, `--desperate`).
+
 ## Run
 
 Open `dist/Set Downloader.app` (build it with `scripts/build-app.sh`). It has Python, tl2mixxx and

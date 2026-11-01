@@ -150,11 +150,30 @@ export interface SearchJobResult {
   results: SearchResult[];
 }
 
+/** A file found under another name, scored against the track (see tl2mixxx's match.py). */
+export interface LikelyFile extends SearchResult {
+  score: number;
+  confidence: "high" | "medium" | "low";
+  reasons: string[];
+  substitute: boolean;
+  query: string;
+}
+
+export interface SuggestJobResult {
+  tracks: {
+    row: number;
+    display: string;
+    queries: { query: string; results: number; failed: boolean }[];
+    candidates: LikelyFile[];
+    taken: { name: string; link: string; file: string } | null;
+  }[];
+}
+
 export type JobState = "queued" | "running" | "stopping" | "done" | "failed" | "stopped";
 
 export interface Job {
   id: string;
-  kind: "download" | "search" | "fix";
+  kind: "download" | "search" | "fix" | "suggest";
   title: string;
   set: string | null;
   row: number | null;
@@ -167,7 +186,7 @@ export interface Job {
   exit_code: number | null;
   message: string;
   error: string;
-  result: SetResult | SearchJobResult | null;
+  result: SetResult | SearchJobResult | SuggestJobResult | null;
   log_lines: number;
   log?: string[];
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowClockwiseIcon, ArrowSquareOutIcon, DownloadSimpleIcon, FolderOpenIcon } from "@phosphor-icons/react";
+import { ArrowClockwiseIcon, ArrowSquareOutIcon, DownloadSimpleIcon, FolderOpenIcon, SparkleIcon } from "@phosphor-icons/react";
 import { api, ApiError, errorText } from "../lib/api";
 import { haveFileText, needsAttention, when, MASHUP_LABELS } from "../lib/format";
 import { loadTracks, useStore } from "../lib/store";
@@ -63,6 +63,15 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
     }
   }
 
+  async function findRenamed() {
+    setActionError(null);
+    try {
+      await api.suggestMissing(set.id);
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e : new ApiError(0, "error", errorText(e)));
+    }
+  }
+
   async function reveal() {
     setActionError(null);
     try {
@@ -72,6 +81,7 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
     }
   }
 
+  const renaming = Object.values(jobs).find((j) => j.kind === "suggest" && j.set === set.id && j.row === null && isActive(j)) ?? null;
   const retryLabel = download ? (download.state === "queued" ? "Queued" : "Downloading") : "Retry missing";
 
   return (
@@ -99,6 +109,16 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
           <IconButton label="Show in Finder" onClick={() => void reveal()}>
             <FolderOpenIcon size={16} />
           </IconButton>
+          {missing > 0 && !download && (
+            <Button
+              icon={<SparkleIcon size={15} />}
+              disabled={!!renaming}
+              onClick={() => void findRenamed()}
+              title="Tries other names for each missing track and takes the files that surely are the track."
+            >
+              {renaming ? (renaming.state === "queued" ? "Queued" : "Looking") : "Find renamed tracks"}
+            </Button>
+          )}
           {(missing > 0 || download) && (
             <Button
               variant="primary"

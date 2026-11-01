@@ -21,6 +21,23 @@ import time
 from pathlib import Path
 
 
+def fake_results(query, missing):
+    """Made-up results for a search: none when the query has a word listed in missing."""
+    if any(word in query for word in missing):
+        return []
+    folder = f"Music\\{query}"
+    return [
+        {"User": {"Username": "alice", "UploadSpeed": 2.5, "HasFreeUploadSlot": True},
+         "File": {"Length": 301, "Filename": f"{folder}\\01 {query}.flac", "Size": 31000000,
+                  "SampleRate": 44100, "BitDepth": 16}},
+        {"User": {"Username": "bob", "UploadSpeed": 0.4, "HasFreeUploadSlot": False},
+         "File": {"Length": 299, "Filename": f"{folder}\\{query} (Radio Edit).mp3", "Size": 9000000,
+                  "Bitrate": 320}},
+        {"User": {"Username": "bob", "UploadSpeed": 0.4, "HasFreeUploadSlot": False},
+         "File": {"Filename": f"{folder}\\cover.jpg", "Size": 50000}},
+    ]
+
+
 def main(argv):
     opts = {}
     i = 1
@@ -34,24 +51,14 @@ def main(argv):
     with open(os.environ.get("FAKE_SOCKSEEK_LOG", os.devnull), "a") as log:
         log.write(" ".join(argv) + "\n")
 
-    if opts.get("--print") == "json-all":
-        query = argv[0]
-        results = []
-        if not any(word in query for word in missing):
-            folder = f"Music\\{query}"
-            results = [
-                {"User": {"Username": "alice", "UploadSpeed": 2.5, "HasFreeUploadSlot": True},
-                 "File": {"Length": 301, "Filename": f"{folder}\\01 {query}.flac", "Size": 31000000,
-                          "SampleRate": 44100, "BitDepth": 16}},
-                {"User": {"Username": "bob", "UploadSpeed": 0.4, "HasFreeUploadSlot": False},
-                 "File": {"Length": 299, "Filename": f"{folder}\\{query} (Radio Edit).mp3", "Size": 9000000,
-                          "Bitrate": 320}},
-                {"User": {"Username": "bob", "UploadSpeed": 0.4, "HasFreeUploadSlot": False},
-                 "File": {"Filename": f"{folder}\\cover.jpg", "Size": 50000}},
-            ]
-        print(json.dumps(results))
+    if opts.get("--print") == "json-all" and opts.get("--input-type") == "csv":
+        # Several searches in one run (a CSV of titles): one line of results each, in order
+        for row in csv.DictReader(Path(argv[0]).open(encoding="utf-8")):
+            print(json.dumps(fake_results(row["Title"], missing)))
         return 0
-
+    if opts.get("--print") == "json-all":
+        print(json.dumps(fake_results(argv[0], missing)))
+        return 0
     out = Path(opts["-o"])
     index = Path(opts["--index-path"])
     out.mkdir(parents=True, exist_ok=True)

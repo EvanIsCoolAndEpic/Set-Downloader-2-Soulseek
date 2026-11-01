@@ -25,6 +25,8 @@ from .settings import SetPrefs, SettingsStore, check_mashups, has_control_chars
 
 MAX_QUERY = 300
 EXIT_STOPPED = ss.EXIT_INTERRUPTED   # tl2mixxx's exit code when it was stopped
+# sockseek's broader searches, for retries (see start_download)
+RETRY_SEARCH = ["--remove-ft", "--artist-maybe-wrong", "--desperate"]
 
 
 def child_env() -> dict:
@@ -334,6 +336,10 @@ class App:
         if running is not None:
             return running, True
         sockseek, after = self._soulseek_args()
+        if not new_set:
+            # A retry only searches for what's still missing, so it can afford to try harder:
+            # without "feat." credits, without the artist, and by artist or title alone
+            after += RETRY_SEARCH
         music.mkdir(parents=True, exist_ok=True)
         self.set_prefs.set_mashups(folder, mashups)
         job = Job(kind="download", title=title, args=[], soulseek=True, set_id=folder.name,
@@ -413,6 +419,55 @@ class App:
         job.args = args + [f"--result-json={result}", "--stop-on-eof", *after]
         job.finish = lambda j, code: self._finish_set_job(j, code, result, folder)
         return self.jobs.submit(job)
+
+    def start_suggest(self, set_id: object, row: object = None, identity: object = None) -> Job:
+        """Look for missing tracks under other names: one track (row, its identity) gets its likely
+        files listed; without a row, every missing track is looked for and the files that surely
+        are the track are downloaded and kept as its fix."""
+        folder = set_folder(self.music_dir(), set_id)
+        args = ["suggest", str(folder)]
+        if row is None:
+            args += ["--missing", "--auto"]
+            title = "Find renamed tracks"
+        else:
+            if not isinstance(row, int) or isinstance(row, bool) or row < 1:
+                raise bad_request("row is the track's row number.", "bad_row")
+            if not isinstance(identity, str) or not identity or has_control_chars(identity):
+                raise bad_request('identity is the track\'s "identity" from its tracks.', "bad_identity")
+            args += [f"--track={row}", f"--expect-key={identity}"]
+            title = f"{self._track_display(folder, row)}: likely matches"
+        sockseek, after = self._soulseek_args()
+        args += [f"--mashups={self.mashups_for(folder)}", *sockseek]
+        job = Job(kind="suggest", title=title, args=[], soulseek=True, set_id=folder.name, folder=str(folder),
+                  row=row if isinstance(row, int) else None)
+        result = self._result_path(job.id)
+        job.args = args + [f"--result-json={result}", "--stop-on-eof", *after]
+        job.finish = lambda j, code: self._finish_suggest(j, code, result, folder)
+        return self.jobs.submit(job)
+
+    def _finish_suggest(self, job: Job, code: int, result_path: Path, folder: Path) -> tuple[str, str, dict | None]:
+        data = read_result(result_path)
+        tracks = (data or {}).get("tracks") or []
+        taken = [t for t in tracks if t.get("taken")]
+        if taken:
+            self.library.forget(folder)
+            self.bus.publish("sets", {"set": folder.name, "reason": job.kind})
+        if job.stop_requested or code == EXIT_STOPPED:
+            return STOPPED, "Stopped. Files already downloaded are kept.", {"tracks": tracks}
+        if data is None:
+            return FAILED, no_result_message(job, code), None
+        errors = [str(e) for e in data.get("errors") or []]
+        if job.row is not None:
+            found = tracks[0]["candidates"] if tracks else []
+            sure = sum(1 for c in found if c.get("confidence") == "high")
+            message = (f"{len(found)} likely file(s), {sure} that surely are the track." if found else
+                       "Nothing found under other names. You can still search with your own words.")
+        else:
+            message = (f"Found {len(taken)} of {len(tracks)} missing track(s) under other names." if tracks
+                       else "Nothing is missing.")
+        if errors:
+            message += " " + " ".join(f"Error: {e}" for e in errors)
+        return (DONE if code == 0 or taken else FAILED), message, {"tracks": tracks}
 
     @staticmethod
     def _track_display(folder: Path, row: int) -> str:

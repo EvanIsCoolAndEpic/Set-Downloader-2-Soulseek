@@ -38,7 +38,8 @@ export function JobBar({ onOpenSet }: { onOpenSet: (id: string) => void }) {
     }
   }
 
-  const lastLine = log?.lines[log.lines.length - 1] ?? last.message;
+  // A running job's latest line; a finished one's summary
+  const lastLine = isActive(last) ? (log?.lines[log.lines.length - 1] ?? last.message) : last.message;
 
   return (
     <footer className="col-span-2 border-t border-line bg-side">

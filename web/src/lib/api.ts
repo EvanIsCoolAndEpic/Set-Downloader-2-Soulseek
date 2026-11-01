@@ -135,6 +135,9 @@ export const api = {
   ) => request<{ job: Job }>("POST", `/api/sets/${enc(set)}/tracks/${row}/fix`, body),
 
   search: (query: string) => request<{ job: Job }>("POST", "/api/searches", { query }),
+  suggest: (set: string, row: number, identity: string) =>
+    request<{ job: Job }>("POST", `/api/sets/${enc(set)}/tracks/${row}/suggest`, { identity }),
+  suggestMissing: (set: string) => request<{ job: Job }>("POST", `/api/sets/${enc(set)}/suggest`),
   upload: (file: File) =>
     request<{ upload: Upload }>("POST", `/api/uploads?name=${enc(file.name)}`, file),
   deleteUpload: (id: string) => request<{ ok: true }>("DELETE", `/api/uploads/${enc(id)}`),

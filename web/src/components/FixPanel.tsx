@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
 import {
+  SparkleIcon,
   ArrowCounterClockwiseIcon,
   CheckCircleIcon,
   DownloadSimpleIcon,
@@ -25,7 +26,15 @@ import {
   trackStatus,
 } from "../lib/format";
 import { getData, useStore } from "../lib/store";
-import { isActive, type Job, type SearchJobResult, type SearchResult, type Track } from "../lib/types";
+import {
+  isActive,
+  type Job,
+  type LikelyFile,
+  type SearchJobResult,
+  type SearchResult,
+  type SuggestJobResult,
+  type Track,
+} from "../lib/types";
 import { Button, IconButton } from "./ui/Button";
 import { inputClass, FieldError } from "./ui/Field";
 import { Notice } from "./ui/Notice";
@@ -69,8 +78,11 @@ export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }
     return active ?? (fixId ? jobs[fixId] : undefined);
   }, [jobs, setId, track.row, fixId]);
   const fixing = !!fixJob && isActive(fixJob);
-  const result = search?.state === "done" ? (search.result as SearchJobResult | null) : null;
-  const results = result?.results ?? [];
+  // A search's results, or the likely files a "find likely matches" job scored
+  const done = search?.state === "done" ? search.result : null;
+  const result = done && "results" in done ? (done as SearchJobResult) : null;
+  const likely = done && "tracks" in done ? ((done as SuggestJobResult).tracks[0]?.candidates ?? []) : null;
+  const results: (SearchResult | LikelyFile)[] = likely ?? result?.results ?? [];
 
   // Another track: start over, and stop a search that was for the old one
   useEffect(() => {
@@ -108,16 +120,29 @@ export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }
     }
   }
 
+  async function findLikely() {
+    setError(null);
+    setPicked(null);
+    if (search && isActive(search)) void api.stopJob(search.id).catch(() => {});
+    try {
+      const { job } = await api.suggest(setId, track.row, track.identity);
+      setSearchId(job.id);
+    } catch (e) {
+      setError(asApiError(e));
+    }
+  }
+
   async function stopSearch() {
     if (search) await api.stopJob(search.id).catch(() => {});
   }
 
   async function downloadPicked() {
     const r = results.find((x) => x.link === picked);
-    if (!r || !result) return;
+    const q = r && "query" in r ? r.query : result?.query;
+    if (!r || !q) return;
     setError(null);
     try {
-      const { job } = await api.fix(setId, track.row, { identity: track.identity, link: r.link, query: result.query });
+      const { job } = await api.fix(setId, track.row, { identity: track.identity, link: r.link, query: q });
       setFixId(job.id);
     } catch (e) {
       setError(asApiError(e));
@@ -243,6 +268,17 @@ export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }
             </Button>
           )}
         </div>
+        {!track.unidentified && (
+          <button
+            type="button"
+            onClick={() => void findLikely()}
+            disabled={!!search && isActive(search)}
+            className="mt-1 inline-flex items-center gap-1.5 self-start rounded-control text-xs font-medium text-accent-fg hover:underline disabled:opacity-45"
+          >
+            <SparkleIcon size={13} aria-hidden />
+            Find likely matches under other names
+          </button>
+        )}
       </form>
 
       <div className="flex min-h-0 flex-1 flex-col">
@@ -341,6 +377,8 @@ function SearchState({ job, count, hasDuration }: { job?: Job; count: number; ha
       job.waiting === "soulseek"
         ? `Waiting for the download that's running to finish...${job.ahead ? ` (${job.ahead} ahead)` : ""}`
         : "Starting the search...";
+  } else if (job.state === "running" && job.kind === "suggest") {
+    text = "Trying other names on Soulseek, broadest last...";
   } else if (job.state === "running") {
     text = `Searching Soulseek for "${(job.title.match(/^Search: "(.*)"$/) ?? [])[1] ?? ""}"...`;
   } else if (job.state === "stopping") {
@@ -386,7 +424,7 @@ function Results({
   onChoose,
   trackDuration,
 }: {
-  results: SearchResult[];
+  results: (SearchResult | LikelyFile)[];
   picked: string | null;
   onPick: (link: string) => void;
   onChoose: () => void;
@@ -435,6 +473,12 @@ function Results({
             <span className="truncate font-mono text-xs text-fg" title={r.path}>
               {r.name}
             </span>
+            {"confidence" in r && (
+              <span className="flex min-w-0 items-baseline gap-2 text-2xs">
+                <span className={`shrink-0 font-medium ${CONFIDENCE[r.confidence].tone}`}>{CONFIDENCE[r.confidence].label}</span>
+                <span className="truncate text-fg-3">{r.reasons.join(", ")}</span>
+              </span>
+            )}
             <span className="grid grid-cols-[minmax(0,1.1fr)_auto_auto_minmax(0,1fr)] items-center gap-x-3 font-mono tabular text-2xs text-fg-2">
               <span className="truncate">{quality(r)}</span>
               <span
@@ -458,6 +502,12 @@ function Results({
     </div>
   );
 }
+
+const CONFIDENCE = {
+  high: { label: "Surely the track", tone: "text-ok" },
+  medium: { label: "Likely", tone: "text-accent-fg" },
+  low: { label: "Unlikely", tone: "text-fg-3" },
+} as const;
 
 const RUNNING_WORDS = {
   pick: () => "Downloading the picked file...",
