@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "set-downloader"
+version = "0.1.0"
+description = "Saved 1001Tracklists pages or pasted tracklists -> tracks downloaded from Soulseek (tl2mixxx + sockseek)"
+requires-python = ">=3.10"
+dependencies = ["tl2mixxx>=0.4.1", "pywebview>=5"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6"]
+
+[project.scripts]
+set-downloader = "setdl.app:main"
+
+[tool.setuptools.packages.find]
+include = ["setdl*"]
+
+# tl2mixxx isn't on PyPI: it comes from its own folder next to this one
+[tool.uv.sources]
+tl2mixxx = { path = "../tl2mixxx", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

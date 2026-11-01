@@ -1,0 +1,9 @@
+.venv/
+web/node_modules/
+web/dist/
+dist/
+build/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+/Set Downloader.app
