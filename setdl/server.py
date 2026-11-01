@@ -71,8 +71,10 @@ ROUTES = [
     ("DELETE", r"/api/login", "delete_login"),
     ("POST", r"/api/drafts/page", "post_draft_page"),
     ("POST", r"/api/drafts/text", "post_draft_text"),
+    ("POST", r"/api/drafts/resolve", "post_draft_resolve"),
     ("GET", r"/api/drafts/([^/]+)", "get_draft"),
     ("DELETE", r"/api/drafts/([^/]+)", "delete_draft"),
+    ("POST", r"/api/drafts/([^/]+)/pick", "post_draft_pick"),
     ("POST", r"/api/downloads", "post_download"),
     ("GET", r"/api/sets", "get_sets"),
     ("GET", r"/api/sets/([^/]+)", "get_set"),
@@ -80,6 +82,9 @@ ROUTES = [
     ("POST", r"/api/sets/([^/]+)/tracks/([0-9]{1,6})/fix", "post_fix"),
     ("POST", r"/api/sets/([^/]+)/tracks/([0-9]{1,6})/suggest", "post_suggest_track"),
     ("POST", r"/api/sets/([^/]+)/suggest", "post_suggest_missing"),
+    ("POST", r"/api/sets/([^/]+)/tracks/([0-9]{1,6})/fallback", "post_track_fallback"),
+    ("POST", r"/api/sets/([^/]+)/tracks/([0-9]{1,6})/cut", "post_track_cut"),
+    ("POST", r"/api/sets/([^/]+)/finish", "post_finish"),
     ("POST", r"/api/searches", "post_search"),
     ("POST", r"/api/uploads", "post_upload"),
     ("DELETE", r"/api/uploads/([^/]+)", "delete_upload"),
@@ -89,6 +94,8 @@ ROUTES = [
     ("GET", r"/api/events", "get_events"),
     ("POST", r"/api/reveal", "post_reveal"),
     ("POST", r"/api/open-url", "post_open_url"),
+    ("POST", r"/api/ytdlp/update", "post_ytdlp_update"),
+    ("DELETE", r"/api/ytdlp/update", "delete_ytdlp_update"),
 ]
 COMPILED = [(m, re.compile(p), name) for m, p, name in ROUTES]
 
@@ -350,6 +357,19 @@ class Handler(BaseHTTPRequestHandler):
         body = self._json(TEXT_LIMIT)
         self._send_json(201, self.server.app.create_draft_text(body.get("text"), body.get("title")))
 
+    def post_draft_resolve(self) -> None:
+        body = self._json(TEXT_LIMIT)
+        app = self.server.app
+        draft, job = app.resolve_input(body.get("input"), body.get("title"))
+        if job is not None:
+            self._send_json(202, {"job": app.jobs.snapshot(job)})
+        else:
+            self._send_json(201, {"draft": draft})
+
+    def post_draft_pick(self, draft_id: str) -> None:
+        body = self._json()
+        self._send_json(200, self.server.app.pick_alternative(draft_id, body.get("pick")))
+
     def get_draft(self, draft_id: str) -> None:
         self._send_json(200, self.server.app.get_draft(draft_id))
 
@@ -398,6 +418,33 @@ class Handler(BaseHTTPRequestHandler):
         app = self.server.app
         job = app.start_suggest(set_id)
         self._send_json(202, {"job": app.jobs.snapshot(job)})
+
+    def _track_job(self, start, set_id: str, row: str) -> None:
+        body = self._json()
+        n = int(row)
+        if not 1 <= n <= MAX_ROW:
+            raise bad_request("row is the track's row number.", "bad_row")
+        job = start(set_id, n, body.get("identity"))
+        self._send_json(202, {"job": self.server.app.jobs.snapshot(job)})
+
+    def post_track_fallback(self, set_id: str, row: str) -> None:
+        self._track_job(self.server.app.start_track_fallback, set_id, row)
+
+    def post_track_cut(self, set_id: str, row: str) -> None:
+        self._track_job(self.server.app.start_track_cut, set_id, row)
+
+    def post_finish(self, set_id: str) -> None:
+        self._body(JSON_LIMIT)
+        app = self.server.app
+        self._send_json(202, {"job": app.jobs.snapshot(app.start_finish(set_id))})
+
+    def post_ytdlp_update(self) -> None:
+        self._body(JSON_LIMIT)
+        self._send_json(202, {"ytdlp": self.server.app.update_ytdlp()})
+
+    def delete_ytdlp_update(self) -> None:
+        self._body(JSON_LIMIT)
+        self._send_json(200, {"ytdlp": self.server.app.revert_ytdlp()})
 
     def post_search(self) -> None:
         body = self._json()

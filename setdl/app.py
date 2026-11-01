@@ -4,6 +4,9 @@
     set-downloader --browser        serve it and open it in the web browser instead (development)
     set-downloader --tl2mixxx ...   run the tl2mixxx CLI and exit: how the built app runs its jobs,
                                     since it has no "python -m tl2mixxx"
+    set-downloader --helper ...     the app's own job commands (helpers.py)
+
+Both of the last two import an updated yt-dlp first, if the app passed one (ytdlp.py).
 """
 
 from __future__ import annotations
@@ -18,15 +21,24 @@ def run_tl2mixxx(args: list[str]) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except (AttributeError, ValueError):
             pass
+    from .ytdlp import prefer_from_env
+    prefer_from_env()
     from tl2mixxx.cli import main as tl2mixxx_main
     return tl2mixxx_main(args)
+
+
+def run_helper(args: list[str]) -> int:
+    from .ytdlp import prefer_from_env
+    prefer_from_env()
+    from .helpers import main as helper_main
+    return helper_main(args)
 
 
 def build_parser():
     import argparse
 
     from . import APP_NAME, __version__
-    p = argparse.ArgumentParser(prog="set-downloader", description=f"{APP_NAME}: 1001Tracklists sets from Soulseek.")
+    p = argparse.ArgumentParser(prog="set-downloader", description=f"{APP_NAME}: any tracklist in, its tracks downloaded.")
     p.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     p.add_argument("--browser", action="store_true",
                    help="serve the app and open it in the web browser instead of a window (development)")
@@ -50,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["--tl2mixxx"]:
         return run_tl2mixxx(argv[1:])
+    if argv[:1] == ["--helper"]:
+        return run_helper(argv[1:])
 
     import signal
     import threading

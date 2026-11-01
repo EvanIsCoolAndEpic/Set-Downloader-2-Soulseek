@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "set-downloader"
 version = "0.1.0"
-description = "Saved 1001Tracklists pages or pasted tracklists -> tracks downloaded from Soulseek (tl2mixxx + sockseek)"
+description = "Any tracklist (a link, text, a CSV, a screenshot, a saved 1001Tracklists page) -> its tracks from Soulseek, YouTube or the set's recording (tl2mixxx + sockseek + yt-dlp)"
 requires-python = ">=3.10"
-dependencies = ["tl2mixxx>=0.4.1", "pywebview>=5"]
+dependencies = ["tl2mixxx[media,ocr]>=0.5", "pywebview>=5"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pyinstaller>=6"]

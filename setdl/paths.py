@@ -43,13 +43,25 @@ def mixxx_login_path() -> Path:
     return Path.home() / ".mixxx" / "1001tracklists-sockseek.conf"
 
 
-def tl2mixxx_command() -> list[str]:
-    """How to run the tl2mixxx CLI. The built app has no "python -m": its own executable runs
-    tl2mixxx when its first argument is --tl2mixxx (see app.main). From source, -I keeps the
-    child from importing anything from its working folder or PYTHON* variables."""
+def self_command(flag: str) -> list[str]:
+    """How to run this app's multi-call entry (see app.main). The built app has no "python -m":
+    its own executable does it. From source, -I keeps the child from importing anything from its
+    working folder or PYTHON* variables."""
     if frozen():
-        return [sys.executable, "--tl2mixxx"]
-    return [sys.executable, "-I", "-u", "-X", "utf8", "-m", "tl2mixxx"]
+        return [sys.executable, flag]
+    return [sys.executable, "-I", "-u", "-X", "utf8", "-m", "setdl", flag]
+
+
+def tl2mixxx_command() -> list[str]:
+    """How to run the tl2mixxx CLI: through the app's entry, which first makes an updated yt-dlp
+    (if there is one) the one tl2mixxx imports."""
+    return self_command("--tl2mixxx")
+
+
+def helper_command() -> list[str]:
+    """How to run the app's own helpers (helpers.py): downloading a picked video for a track,
+    checking which yt-dlp is in use."""
+    return self_command("--helper")
 
 
 def bundled_sockseek() -> Path | None:

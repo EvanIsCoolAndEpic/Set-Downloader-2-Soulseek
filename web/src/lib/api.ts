@@ -7,8 +7,10 @@ import type {
   Login,
   Mashups,
   SetSummary,
+  Settings,
   TracksResponse,
   Upload,
+  YtdlpStatus,
 } from "./types";
 
 const TOKEN_KEY = "setdl-token";
@@ -104,8 +106,9 @@ const enc = encodeURIComponent;
 
 export const api = {
   state: () => request<AppState>("GET", "/api/state"),
-  saveSettings: (changes: Partial<AppState["settings"]>) =>
-    request<AppState>("PUT", "/api/settings", changes),
+  saveSettings: (changes: Partial<Settings>) => request<AppState>("PUT", "/api/settings", changes),
+  updateYtdlp: () => request<{ ytdlp: YtdlpStatus }>("POST", "/api/ytdlp/update"),
+  revertYtdlp: () => request<{ ytdlp: YtdlpStatus }>("DELETE", "/api/ytdlp/update"),
   saveLogin: (username: string, password: string) =>
     request<{ login: Login }>("PUT", "/api/login", { username, password }),
   forgetLogin: () => request<{ login: Login }>("DELETE", "/api/login"),
@@ -113,6 +116,9 @@ export const api = {
   draftFromFile: (file: File) =>
     request<Draft>("POST", `/api/drafts/page?name=${enc(file.name)}`, file),
   draftFromText: (text: string) => request<Draft>("POST", "/api/drafts/text", { text }),
+  /** Paste anything: text is a draft right away, a link is read by a job. */
+  resolve: (input: string) => request<{ draft: Draft } | { job: Job }>("POST", "/api/drafts/resolve", { input }),
+  pick: (id: string, pick: number) => request<Draft>("POST", `/api/drafts/${enc(id)}/pick`, { pick }),
   draft: (id: string) => request<Draft>("GET", `/api/drafts/${enc(id)}`),
   deleteDraft: (id: string) => request<{ ok: true }>("DELETE", `/api/drafts/${enc(id)}`),
 
@@ -138,6 +144,11 @@ export const api = {
   suggest: (set: string, row: number, identity: string) =>
     request<{ job: Job }>("POST", `/api/sets/${enc(set)}/tracks/${row}/suggest`, { identity }),
   suggestMissing: (set: string) => request<{ job: Job }>("POST", `/api/sets/${enc(set)}/suggest`),
+  findOnYoutube: (set: string, row: number, identity: string) =>
+    request<{ job: Job }>("POST", `/api/sets/${enc(set)}/tracks/${row}/fallback`, { identity }),
+  cutFromSet: (set: string, row: number, identity: string) =>
+    request<{ job: Job }>("POST", `/api/sets/${enc(set)}/tracks/${row}/cut`, { identity }),
+  finishSet: (set: string) => request<{ job: Job }>("POST", `/api/sets/${enc(set)}/finish`),
   upload: (file: File) =>
     request<{ upload: Upload }>("POST", `/api/uploads?name=${enc(file.name)}`, file),
   deleteUpload: (id: string) => request<{ ok: true }>("DELETE", `/api/uploads/${enc(id)}`),

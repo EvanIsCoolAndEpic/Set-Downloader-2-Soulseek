@@ -1,0 +1,21 @@
+{
+ "id": "rooftop0001",
+ "title": "Kettle | Rooftop Session",
+ "extractor_key": "Youtube",
+ "extractor": "youtube",
+ "webpage_url": "https://www.youtube.com/watch?v=rooftop0001",
+ "original_url": "https://youtu.be/rooftop0001",
+ "duration": 100,
+ "uploader": "Rooftop Sessions",
+ "channel": "Rooftop Sessions",
+ "description": "Kettle on the roof, summer 2026.\n\nSubscribe for more.",
+ "chapters": null,
+ "comments": [
+  {"id": "c1", "text": "Tracklist:\n0:00 Kettle - Ghosts\n0:20 Saltmarsh - Pressure\n0:40 Northern Lights - Fog Machine\n1:00 ID - ID\n1:20 Four Tet - Baby",
+   "like_count": 820, "author": "@trainspotter", "author_is_uploader": false, "is_pinned": true, "parent": "root"},
+  {"id": "c2", "text": "first ones:\n0:00 Kettle - Ghosts\n0:20 Saltmarsh - Pressure\n0:40 Northern Lights - Fog Machine (Extended Mix)",
+   "like_count": 95, "author": "@quick", "author_is_uploader": false, "is_pinned": false, "parent": "root"},
+  {"id": "c3", "text": "0:55 when the drop hits, what a moment", "like_count": 4000, "author": "@watcher",
+   "author_is_uploader": false, "is_pinned": false, "parent": "root"}
+ ]
+}

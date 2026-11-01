@@ -130,6 +130,7 @@ export function App() {
           <FixPanel
             key={`${set.id}:${fixTrack.row}`}
             setId={set.id}
+            hasRecording={!!set.recording}
             track={fixTrack}
             closing={closing}
             onClose={closeFix}

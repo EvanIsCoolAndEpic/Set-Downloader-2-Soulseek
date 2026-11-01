@@ -50,8 +50,10 @@ def test_a_dropped_txt_file_is_text(client, tmp_path):
 
 
 def test_not_a_tracklist(client):
+    # Not a 1001Tracklists page: tl2mixxx resolve looks for a list in it too
     status, data = client.post("/api/drafts/page?name=x.html", b"<html><body>hello</body></html>")
-    assert status == 422 and data["error"]["code"] == "not_a_tracklist" and "No tracks found" in data["error"]["message"]
+    assert status == 422 and data["error"]["code"] == "not_a_tracklist" and "No tracklist found" in data["error"]["message"]
+    assert "Save Page As" in data["error"]["message"]
     status, data = client.post("/api/drafts/text", {"text": "just words\nno tracks here"})
     assert status == 422
     assert client.post("/api/drafts/text", {"text": "   "})[0] == 400

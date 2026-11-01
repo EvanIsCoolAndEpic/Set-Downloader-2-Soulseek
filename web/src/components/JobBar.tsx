@@ -14,7 +14,9 @@ export function JobBar({ onOpenSet }: { onOpenSet: (id: string) => void }) {
   const logRef = useRef<HTMLDivElement>(null);
 
   const jobs = useMemo(() => jobsNewestFirst(jobsMap), [jobsMap]);
+  // The Soulseek and YouTube lanes can each have one running: the newest is shown
   const running = jobs.find((j) => j.state === "running" || j.state === "stopping") ?? null;
+  const alsoRunning = jobs.filter((j) => (j.state === "running" || j.state === "stopping") && j !== running).length;
   const queued = jobs.filter((j) => j.state === "queued").reverse();
   const last = running ?? jobs.find((j) => !isActive(j)) ?? null;
   const log = last ? logs[last.id] : undefined;
@@ -39,7 +41,7 @@ export function JobBar({ onOpenSet }: { onOpenSet: (id: string) => void }) {
   }
 
   // A running job's latest line; a finished one's summary
-  const lastLine = isActive(last) ? (log?.lines[log.lines.length - 1] ?? last.message) : last.message;
+  const lastLine = isActive(last) ? (log?.lines[log.lines.length - 1] ?? last.message) : last.message || last.error;
 
   return (
     <footer className="col-span-2 border-t border-line bg-side">
@@ -70,11 +72,19 @@ export function JobBar({ onOpenSet }: { onOpenSet: (id: string) => void }) {
       <div className="flex h-11 items-center gap-3 px-4">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex min-w-0 items-baseline gap-2 text-xs">
-            <span className="shrink-0 font-medium">{last.title}</span>
+            <span className="max-w-[45%] shrink-0 truncate font-medium">{last.title}</span>
             <span className="shrink-0 text-fg-3">{stateText(last)}</span>
-            <span className="truncate font-mono text-[11px] text-fg-3">{error ?? lastLine}</span>
+            {alsoRunning > 0 && <span className="shrink-0 text-fg-3">+{alsoRunning} more running</span>}
+            <span className="truncate font-mono text-[11px] text-fg-3">{error ?? (running?.progress?.text || lastLine)}</span>
           </div>
-          {running && <div className="progress" aria-hidden />}
+          {running &&
+            (running.progress ? (
+              <div className="meter" role="progressbar" aria-valuenow={Math.round(running.progress.fraction * 100)} aria-valuemin={0} aria-valuemax={100}>
+                <span style={{ transform: `scaleX(${running.progress.fraction})` }} />
+              </div>
+            ) : (
+              <div className="progress" aria-hidden />
+            ))}
         </div>
         {last.set && !isActive(last) && (
           <Button size="sm" variant="ghost" onClick={() => onOpenSet(last.set!)}>
@@ -94,12 +104,24 @@ export function JobBar({ onOpenSet }: { onOpenSet: (id: string) => void }) {
   );
 }
 
+const RUNNING_WORDS: Record<string, string> = {
+  download: "downloading from Soulseek",
+  search: "searching Soulseek",
+  suggest: "trying other names",
+  fix: "fixing",
+  resolve: "reading",
+  fallback: "looking on YouTube",
+  cut: "cutting from the recording",
+  finish: "finishing files",
+};
+
 function stateText(job: Job): string {
-  if (job.state === "queued") return job.waiting === "soulseek" ? "waiting for Soulseek" : "queued";
-  if (job.state === "running") return "running";
+  if (job.state === "queued")
+    return job.waiting === "soulseek" ? "waiting for Soulseek" : job.waiting === "youtube" ? "waiting for YouTube" : "queued";
+  if (job.state === "running") return RUNNING_WORDS[job.kind] ?? "running";
   if (job.state === "stopping") return "stopping";
   if (job.state === "stopped") return "stopped";
-  if (job.state === "failed") return job.error ? `failed: ${job.error}` : "failed";
+  if (job.state === "failed") return "failed";   // why is the job's message, next to it
   const r = job.result as SetResult | null;
   if (job.kind === "download" && r && "found" in r) return `done, ${r.found} of ${r.total} found`;
   return "done";

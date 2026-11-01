@@ -17,6 +17,13 @@ from .errors import ApiError, bad_request, not_found
 from .jobs import iso
 
 
+def web_recording(tl) -> str:
+    """The set's recording when it's a web address. A tracklist (maybe shared) never names a file
+    on this Mac: tl2mixxx cut refuses one."""
+    rec = str(tl.recording or "")
+    return rec if rec.lower().startswith(("https://", "http://")) else ""
+
+
 def music_root(music_dir: str | Path) -> Path:
     return Path(music_dir).expanduser().resolve()
 
@@ -60,21 +67,27 @@ def _mtime(path: Path) -> float:
 def _stamp(folder: Path) -> tuple:
     """Changes when anything a set's summary depends on changes. The folder's own time changes
     when a file in it comes or goes (a track deleted by hand, say)."""
-    names = (cli.PAGE_COPY_NAME, cli.TEXT_COPY_NAME, ss.INDEX_NAME, fx.FIXES_NAME, f"{folder.name}.m3u8")
+    names = (*cli.COPY_NAMES, ss.INDEX_NAME, fx.FIXES_NAME, f"{folder.name}.m3u8")
     return (_mtime(folder),) + tuple(_mtime(folder / n) for n in names)
 
 
 def updated_time(folder: Path) -> float:
     """When the set's files last changed: its playlist, sockseek's index, the fixes or the page."""
-    names = (f"{folder.name}.m3u8", ss.INDEX_NAME, fx.FIXES_NAME, cli.PAGE_COPY_NAME, cli.TEXT_COPY_NAME)
+    names = (f"{folder.name}.m3u8", ss.INDEX_NAME, fx.FIXES_NAME, *cli.COPY_NAMES)
     return max((_mtime(folder / n) for n in names), default=0.0) or _mtime(folder)
+
+
+def copy_source(page: Path | None) -> str:
+    """ "page" (a saved page), "text" (pasted) or "resolved" (any other input, kept as JSON)."""
+    name = page.name if page else ""
+    return {cli.TEXT_COPY_NAME: "text", cli.JSON_COPY_NAME: "resolved"}.get(name, "page")
 
 
 def summarize(folder: Path, mashups: str) -> dict:
     """Found / missing / total for a set folder, as "tl2mixxx tracks" and a retry count them."""
     page = cli.page_copy(folder)
     out = {"id": folder.name, "name": folder.name, "title": folder.name, "url": "",
-           "source": "text" if page and page.name == cli.TEXT_COPY_NAME else "page",
+           "source": copy_source(page), "kind": "", "recording": "", "cues": 0,
            "folder": str(folder), "m3u": "", "mashups": mashups, "downloaded": False,
            "found": 0, "missing": 0, "total": 0, "error": None}
     m3u = folder / f"{folder.name}.m3u8"
@@ -83,13 +96,16 @@ def summarize(folder: Path, mashups: str) -> dict:
     try:
         try:
             r = cli.resolve_set(folder, mashups=mashups)
-            out.update(title=r.tl.title, url=r.tl.url, downloaded=(folder / ss.INDEX_NAME).exists(),
+            tl = r.tl
+            out.update(downloaded=(folder / ss.INDEX_NAME).exists(),
                        found=len(r.found), missing=len(r.missing), total=len(r.found) + len(r.missing))
         except cli.SkipSet:
             # Nothing downloaded yet: everything it will search for is missing
             tl = parse_file(page)
             chosen = cli.choose_tracks(tl, mashups, fx.by_row(tl, fx.load(folder)))
-            out.update(title=tl.title, url=tl.url, missing=len(chosen), total=len(chosen))
+            out.update(missing=len(chosen), total=len(chosen))
+        out.update(title=tl.title, url=tl.url, kind=tl.source_kind, recording=web_recording(tl),
+                   cues=sum(t.cue is not None for t in tl.tracks))
     except (ValueError, OSError) as e:
         out["error"] = f"Couldn't read the set's page: {e}"
     # A pasted tracklist's copy has no title of its own (it reads as "_tracklist"): the folder's

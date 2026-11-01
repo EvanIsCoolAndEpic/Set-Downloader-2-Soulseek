@@ -1,9 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowClockwiseIcon, ArrowSquareOutIcon, DownloadSimpleIcon, FolderOpenIcon, SparkleIcon } from "@phosphor-icons/react";
+import {
+  ArrowClockwiseIcon,
+  ArrowSquareOutIcon,
+  DownloadSimpleIcon,
+  FolderOpenIcon,
+  ScissorsIcon,
+  SparkleIcon,
+  TagIcon,
+  YoutubeLogoIcon,
+} from "@phosphor-icons/react";
 import { api, ApiError, errorText } from "../lib/api";
-import { haveFileText, needsAttention, when, MASHUP_LABELS } from "../lib/format";
-import { loadTracks, useStore } from "../lib/store";
-import { isActive, type Job, type SetSummary } from "../lib/types";
+import { breakdown, haveFileText, linkName, needsAttention, when, FORMAT_LABELS, MASHUP_LABELS } from "../lib/format";
+import { jobsNewestFirst, loadTracks, upsertJob, useStore } from "../lib/store";
+import { changesTrack, isActive, isSetJob, type Job, type SetSummary } from "../lib/types";
 import { Button, IconButton } from "./ui/Button";
 import { Notice } from "./ui/Notice";
 import { Segmented } from "./ui/Segmented";
@@ -25,6 +34,7 @@ interface Props {
 export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, onSettings }: Props) {
   const entry = useStore((d) => d.tracks[set.id]);
   const jobs = useStore((d) => d.jobs);
+  const settings = useStore((d) => d.state?.settings);
   const [actionError, setActionError] = useState<ApiError | null>(null);
 
   // Tracks are loaded when the set is opened (and again after its jobs end: see the store)
@@ -33,19 +43,25 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
     if (!set.pending) void loadTracks(set.id, true);
   }, [set.id, set.pending]);
 
+  // The set's download and the steps after it (YouTube, the recording, finishing the files)
   const download = useMemo(
-    () => Object.values(jobs).find((j) => j.kind === "download" && j.set === set.id && isActive(j)) ?? null,
+    () => Object.values(jobs).find((j) => isSetJob(j) && j.set === set.id && isActive(j)) ?? null,
     [jobs, set.id],
   );
   const working = useMemo(() => {
     const m = new Map<number, Job>();
-    for (const j of Object.values(jobs)) if (j.kind === "fix" && j.set === set.id && j.row != null && isActive(j)) m.set(j.row, j);
+    for (const j of Object.values(jobs)) if (changesTrack(j) && j.set === set.id && j.row != null && isActive(j)) m.set(j.row, j);
     return m;
   }, [jobs, set.id]);
 
   const data = entry?.data && entry.data.set === set.id ? entry.data : null;
   const selectable = useMemo(() => (data ? data.tracks.filter((t) => t.selectable) : []), [data]);
   const attention = useMemo(() => selectable.filter(needsAttention), [selectable]);
+  // The set's last Soulseek job, when it failed: the job bar moves on to YouTube, this stays
+  const soulseekFailed = useMemo(() => {
+    const last = jobsNewestFirst(jobs).find((j) => j.set === set.id && j.lane === "soulseek" && !isActive(j));
+    return last?.state === "failed" && last.error ? last : null;
+  }, [jobs, set.id]);
   const found = data ? data.found : set.found;
   const missing = data ? data.missing : set.missing;
   const effectiveFilter: TrackFilter = filter ?? (missing > 0 || attention.length > 0 ? "attention" : "all");
@@ -53,6 +69,16 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
   const hasMashups = !!data?.tracks.some((t) => t.kind === "mashup");
 
   if (set.pending || entry?.errorCode === "not_ready") return <PendingSet set={set} job={download} />;
+
+  async function act(start: () => Promise<{ job: Job }>) {
+    setActionError(null);
+    try {
+      const { job } = await start();
+      upsertJob(job);
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e : new ApiError(0, "error", errorText(e)));
+    }
+  }
 
   async function retry() {
     setActionError(null);
@@ -82,7 +108,18 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
   }
 
   const renaming = Object.values(jobs).find((j) => j.kind === "suggest" && j.set === set.id && j.row === null && isActive(j)) ?? null;
-  const retryLabel = download ? (download.state === "queued" ? "Queued" : "Downloading") : "Retry missing";
+  const retryLabel = download ? (download.state === "queued" ? "Queued" : STEP_WORDS[download.kind]) : "Retry missing";
+  const sources = settings?.sources ?? ["soulseek"];
+  const retryTip =
+    "Looks again for what's still missing: " +
+    [sources.includes("soulseek") && "Soulseek", sources.includes("youtube") && "YouTube", sources.includes("mix") && set.recording && "the set's recording"]
+      .filter(Boolean)
+      .join(", then ") +
+    ", as set in Settings.";
+  const canFinish = !!settings && (settings.format !== "keep" || settings.tags) && found > 0;
+  const finishTip = settings
+    ? `Finish files: ${settings.format !== "keep" ? `convert every file to ${FORMAT_LABELS[settings.format]}` : "keep the formats"}${settings.tags ? " and write tags and covers" : ""}`
+    : "";
 
   return (
     <section aria-label={set.title} className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -90,7 +127,9 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
         <div className="min-w-0 flex-1">
           <h1 className="selectable line-clamp-2 text-xl font-semibold tracking-tight text-fg">{set.title || set.name}</h1>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-2">
-            <span className="tabular">{set.error ? "This set's page can't be read." : haveFileText(found, found + missing)}</span>
+            <span className="tabular" title={haveFileText(found, found + missing)}>
+              {set.error ? "This set's page can't be read." : data ? breakdown(data.tracks) : haveFileText(found, found + missing)}
+            </span>
             {hasMashups && <span>Mashups: {MASHUP_LABELS[set.mashups].toLowerCase()}</span>}
             {set.updated && <span>Updated {when(set.updated)}</span>}
             {set.url && (
@@ -99,7 +138,7 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
                 onClick={() => void api.openUrl(set.url)}
                 className="inline-flex items-center gap-1 rounded-sm text-accent-fg hover:underline"
               >
-                1001Tracklists page
+                {linkName(set.kind, set.url)}
                 <ArrowSquareOutIcon size={12} aria-hidden />
               </button>
             )}
@@ -109,7 +148,12 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
           <IconButton label="Show in Finder" onClick={() => void reveal()}>
             <FolderOpenIcon size={16} />
           </IconButton>
-          {missing > 0 && !download && (
+          {canFinish && (
+            <IconButton label={finishTip} onClick={() => void act(() => api.finishSet(set.id))} disabled={!!download}>
+              <TagIcon size={16} />
+            </IconButton>
+          )}
+          {missing > 0 && !download && sources.includes("soulseek") && (
             <Button
               icon={<SparkleIcon size={15} />}
               disabled={!!renaming}
@@ -122,10 +166,10 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
           {(missing > 0 || download) && (
             <Button
               variant="primary"
-              icon={download ? <DownloadSimpleIcon size={15} /> : <ArrowClockwiseIcon size={15} />}
+              icon={download ? <StepIcon kind={download.kind} /> : <ArrowClockwiseIcon size={15} />}
               disabled={!!download}
               onClick={() => void retry()}
-              title="Retrying only searches for what's still missing, then rebuilds the playlist in set order."
+              title={retryTip}
             >
               {retryLabel}
             </Button>
@@ -146,6 +190,24 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
             }
           >
             {actionError.message}
+          </Notice>
+        </div>
+      )}
+
+      {soulseekFailed && !actionError && (
+        <div className="px-6 pb-3">
+          <Notice
+            tone="warn"
+            title="Soulseek didn't work for this set"
+            action={
+              /check the login/i.test(soulseekFailed.error) ? (
+                <Button size="sm" onClick={onSettings}>
+                  Open settings
+                </Button>
+              ) : undefined
+            }
+          >
+            {soulseekFailed.error}
           </Notice>
         </div>
       )}
@@ -190,7 +252,7 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
             />
             <p className="min-w-0 truncate text-xs text-fg-3">
               {missing > 0
-                ? "Pick a track to search Soulseek with other words, or to use a file of your own."
+                ? "Pick a track to search Soulseek or YouTube, cut it from the set, or use a file of your own."
                 : "Pick a track to replace a wrong version."}
             </p>
           </Toolbar>
@@ -208,6 +270,15 @@ export function SetView({ set, filter, onFilter, selectedRow, onSelect, onOpen, 
   );
 }
 
+const STEP_WORDS: Record<string, string> = {
+  download: "Downloading",
+  fallback: "Looking on YouTube",
+  cut: "Cutting from the mix",
+  finish: "Finishing files",
+};
+
+const STEP_ICONS = { download: DownloadSimpleIcon, fallback: YoutubeLogoIcon, cut: ScissorsIcon, finish: TagIcon } as const;
+
 function Toolbar({ children }: { children?: React.ReactNode }) {
   return (
     <div className="flex h-11 shrink-0 items-center gap-4 border-t border-line px-6">
@@ -218,6 +289,11 @@ function Toolbar({ children }: { children?: React.ReactNode }) {
       )}
     </div>
   );
+}
+
+function StepIcon({ kind }: { kind: string }) {
+  const Icon = STEP_ICONS[kind as keyof typeof STEP_ICONS] ?? DownloadSimpleIcon;
+  return <Icon size={15} />;
 }
 
 /** A new set whose first download is still running: its folder isn't complete yet. */

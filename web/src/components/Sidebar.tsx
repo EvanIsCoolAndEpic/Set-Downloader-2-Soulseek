@@ -14,7 +14,8 @@ export function Sidebar({ view, onView }: Props) {
   const sets = useStore((d) => d.sets);
   const setsError = useStore((d) => d.setsError);
   const state = useStore((d) => d.state);
-  const needsSetup = !!state && (state.login.source === "none" || !state.sockseek.found);
+  // Only Soulseek needs a login and sockseek
+  const needsSetup = !!state && state.settings.sources.includes("soulseek") && (state.login.source === "none" || !state.sockseek.found);
 
   return (
     <nav aria-label="Sets" className="flex min-h-0 flex-col border-r border-line bg-side">

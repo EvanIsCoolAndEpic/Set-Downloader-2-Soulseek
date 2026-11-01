@@ -1,7 +1,9 @@
 """Files the page hands over, kept in the app's scratch folder until they're used:
 
-- drafts: a dropped tracklist page (.html, or a .txt tracklist) or pasted text, parsed to show
-  what will be downloaded before anything starts;
+- drafts: a tracklist parsed to show what will be downloaded before anything starts. A dropped
+  1001Tracklists page (.html), a .txt list or pasted text is kept as it is; anything else (a link,
+  a CSV, a picture...) is kept as the JSON "tl2mixxx resolve" made of it (resolve.py), with the
+  other tracklists it found to pick from;
 - uploads: an audio file of the user's own, for fixing a track (tl2mixxx copies it into the set).
 """
 
@@ -18,10 +20,10 @@ from typing import BinaryIO
 
 from tl2mixxx import cli
 from tl2mixxx import fixes as fx
-from tl2mixxx.tracklist import MASHUP, parse_file
+from tl2mixxx.tracklist import ALBUM, MASHUP, Tracklist, parse_file
 
 from .errors import ApiError, bad_request, not_found
-from .sets import music_root
+from .sets import music_root, web_recording
 from .settings import MASHUPS
 
 PAGE_LIMIT = 20 * 1024 * 1024        # a saved page, bytes
@@ -128,16 +130,75 @@ class Drafts:
             raise not_found("There's no such draft (it may be from an earlier launch).", "no_draft")
         shutil.rmtree(folder, ignore_errors=True)
 
-    def source(self, draft_id: str) -> str:
+    def reserve(self) -> tuple[str, Path]:
+        """A folder for a draft that "tl2mixxx resolve" is making. It's no draft until
+        finish_resolved (or discard) is called."""
+        draft_id = new_id()
+        folder = self.root / draft_id
+        folder.mkdir(parents=True)
+        return draft_id, folder
+
+    def discard(self, draft_id: str) -> None:
+        shutil.rmtree(self._folder(draft_id), ignore_errors=True)
+
+    def finish_resolved(self, draft_id: str, out: Path, origin: dict, default_title: str) -> str:
+        """The JSON resolve wrote becomes the draft. A tracklist without a title (a picture, say)
+        is named default_title."""
         try:
-            return json.loads((self._folder(draft_id) / "draft.json").read_text(encoding="utf-8"))["source"]
-        except (OSError, ValueError, KeyError, TypeError):
-            return "page"
+            data = json.loads(out.read_text(encoding="utf-8"))
+            tl = Tracklist.from_json(data)
+        except (OSError, ValueError) as e:
+            self.discard(draft_id)
+            raise ApiError(422, "not_a_tracklist", f"tl2mixxx's tracklist couldn't be read: {e}")
+        if not tl.tracks:
+            self.discard(draft_id)
+            raise ApiError(422, "not_a_tracklist", "No tracks found.")
+        if not str(data.get("title") or "").strip():
+            data["title"] = default_title
+            out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        (out.parent / "draft.json").write_text(json.dumps({"file": out.name, "source": "resolved",
+                                                           "created": time.time(), "origin": origin}),
+                                               encoding="utf-8")
+        return draft_id
+
+    def meta(self, draft_id: str) -> dict:
+        try:
+            data = json.loads((self._folder(draft_id) / "draft.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def source(self, draft_id: str) -> str:
+        source = self.meta(draft_id).get("source")
+        return source if source in ("page", "text", "resolved") else "page"
 
 
-def draft_info(draft_id: str, source: str, page: Path, music_dir: str | Path, default_mashups: str) -> dict:
+def resolved_extras(page: Path) -> dict:
+    """What resolve says besides the tracklist: the other tracklists it found (without their
+    tracks), which one is taken and where it came from, and its warnings."""
+    out = {"picked": 0, "from": None, "alternatives": [], "warnings": []}
+    if page.suffix.lower() != ".json":
+        return out
+    try:
+        data = json.loads(page.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return out
+    alternatives = data.get("alternatives") if isinstance(data.get("alternatives"), list) else []
+    keys = ("pick", "source", "label", "count", "cues", "likes", "author", "pinned", "by_uploader", "score")
+    out["alternatives"] = [{k: a.get(k) for k in keys} for a in alternatives if isinstance(a, dict)]
+    out["picked"] = data.get("picked") if isinstance(data.get("picked"), int) else 0
+    out["warnings"] = [str(w) for w in data.get("warnings") or [] if isinstance(w, str)]
+    was = data.get("from")
+    if isinstance(was, dict) and isinstance(was.get("source"), str):
+        out["from"] = {"source": was["source"], "label": str(was.get("label") or "")}
+    return out
+
+
+def draft_info(draft_id: str, source: str, page: Path, music_dir: str | Path, default_mashups: str,
+               origin: dict | None = None) -> dict:
     """What the page shows before downloading: the set's tracks and which ones are downloaded under
-    each mashups choice, and whether the set was downloaded before (into the same folder)."""
+    each mashups choice, whether the set was downloaded before (into the same folder), and where
+    the tracklist came from."""
     try:
         tl = parse_file(page)
     except (ValueError, OSError) as e:
@@ -154,12 +215,26 @@ def draft_info(draft_id: str, source: str, page: Path, music_dir: str | Path, de
         "unidentified": t.unidentified, "mashup_of": t.mashup_of,
         "downloads": {m: t.index in chosen[m] for m in MASHUPS},
     } for t in tl.tracks]
+    extras = resolved_extras(page)
+    picked = next((a for a in extras["alternatives"] if a.get("pick") == extras["picked"]), None)
     return {
         "id": draft_id, "source": source, "file": page.name, "title": tl.title, "url": tl.url,
         "set": folder.name, "set_exists": exists, "mashups": default_mashups,
         "has_mashups": any(t.kind == MASHUP for t in tl.tracks),
         "unidentified": sum(t.unidentified for t in tl.tracks),
         "counts": {m: len(chosen[m]) for m in MASHUPS},
+        "kind": tl.source_kind,
+        # What was read: {"kind": "youtube" | "csv" | "image" | ..., "name": file, "url": link}
+        "origin": origin or {},
+        # The candidate taken: its source (description, chapters, comment, comments, sections,
+        # text, csv, ...) and label
+        "picked": extras["picked"], "from": ({"source": picked.get("source"), "label": picked.get("label")}
+                                             if picked else extras["from"]),
+        "alternatives": extras["alternatives"],
+        "warnings": extras["warnings"],
+        "recording": web_recording(tl),
+        "cues": sum(t.cue is not None for t in tl.tracks),
+        "albums": sum(t.kind == ALBUM for t in tl.tracks),
         "tracks": tracks,
     }
 

@@ -6,12 +6,17 @@ from __future__ import annotations
 import json
 import os
 import threading
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-from .errors import bad_request
+from .errors import ApiError, bad_request
 
 MASHUPS = ("components", "original", "both")
+# Where tracks come from, in the order they're tried: Soulseek, then YouTube (and SoundCloud), then
+# cut out of the set's recording
+SOURCES = ("soulseek", "youtube", "mix")
+QUALITIES = ("lossless", "best", "fast")
+FORMATS = ("keep", "flac", "aiff", "mp3", "wav")
 
 
 @dataclass
@@ -19,6 +24,10 @@ class Settings:
     music_dir: str            # each set gets a folder in here
     sockseek: str = ""        # path to sockseek; "" = find it automatically
     mashups: str = "components"
+    sources: list = field(default_factory=lambda: list(SOURCES))   # the ones turned on, in SOURCES' order
+    quality: str = "best"     # what Soulseek downloads: lossless only, the best there is, or the first good one
+    format: str = "keep"      # what every file of a set ends up as (tl2mixxx finish)
+    tags: bool = True         # write names, the set as the album and a cover into the files
 
 
 def write_json(path: Path, data: dict) -> None:
@@ -78,7 +87,32 @@ def check_mashups(value: object) -> str:
     return str(value)
 
 
-CHECKS = {"music_dir": check_music_dir, "sockseek": check_sockseek, "mashups": check_mashups}
+def check_sources(value: object) -> list:
+    if not isinstance(value, list) or any(v not in SOURCES for v in value):
+        raise bad_request('sources is a list of "soulseek", "youtube" and "mix".', "bad_sources")
+    return [s for s in SOURCES if s in value]
+
+
+def check_quality(value: object) -> str:
+    if value not in QUALITIES:
+        raise bad_request('quality is one of "lossless", "best" or "fast".', "bad_quality")
+    return str(value)
+
+
+def check_format(value: object) -> str:
+    if value not in FORMATS:
+        raise bad_request('format is one of "keep", "flac", "aiff", "mp3" or "wav".', "bad_format")
+    return str(value)
+
+
+def check_tags(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise bad_request("tags is true or false.", "bad_tags")
+    return value
+
+
+CHECKS = {"music_dir": check_music_dir, "sockseek": check_sockseek, "mashups": check_mashups,
+          "sources": check_sources, "quality": check_quality, "format": check_format, "tags": check_tags}
 
 
 class SettingsStore:
@@ -92,8 +126,14 @@ class SettingsStore:
         values = {"music_dir": str(default_music_dir)}
         for f in fields(Settings):
             v = saved.get(f.name)
-            if isinstance(v, str) and (f.name != "mashups" or v in MASHUPS):
-                values[f.name] = v
+            if f.name in ("music_dir", "sockseek"):
+                if isinstance(v, str):
+                    values[f.name] = v
+            elif v is not None:
+                try:
+                    values[f.name] = CHECKS[f.name](v)
+                except ApiError:   # a value an older or newer version saved: the default
+                    pass
         values.update({k: v for k, v in (overrides or {}).items() if v is not None})
         self._settings = Settings(**values)
 

@@ -13,20 +13,37 @@ from pathlib import Path
 
 from tl2mixxx import cli
 from tl2mixxx import sockseek as ss
-from tl2mixxx.tracklist import parse_file
+from tl2mixxx.tracklist import parse_file, select_tracks
 
 from . import APP_NAME, __version__, paths
-from .drafts import PAGE_LIMIT, TEXT_LIMIT, UPLOAD_LIMIT, Drafts, Uploads, draft_info, remove_old
+from .drafts import PAGE_LIMIT, TEXT_LIMIT, UPLOAD_LIMIT, Drafts, Uploads, draft_info, remove_old, safe_name
 from .errors import ApiError, bad_request, conflict, not_found
 from .jobs import DONE, FAILED, STOPPED, EventBus, Job, JobManager, iso
 from .login import APP_LOGIN_NAME, Login
-from .sets import SetLibrary, inside, music_root, read_tracks, set_folder
+from .resolve import (OCR_TIMEOUT, RESOLVE_TIMEOUT, SPOTIFY_HELP, as_link, check_image, error_text, file_kind,
+                      link_kind, run_resolve)
+from .sets import SetLibrary, inside, music_root, read_tracks, set_folder, web_recording
 from .settings import SetPrefs, SettingsStore, check_mashups, has_control_chars
+from .ytdlp import UpdateError, Ytdlp
 
 MAX_QUERY = 300
 EXIT_STOPPED = ss.EXIT_INTERRUPTED   # tl2mixxx's exit code when it was stopped
 # sockseek's broader searches, for retries (see start_download)
 RETRY_SEARCH = ["--remove-ft", "--artist-maybe-wrong", "--desperate"]
+# What Soulseek downloads (sockseek's conditions), by the quality setting. A file picked from a
+# search is downloaded whatever these say.
+QUALITY_ARGS = {
+    "lossless": ["--format", "flac,wav,aiff,aif", "--pref-format", "flac"],
+    "best": ["--pref-format", "flac,wav,aiff,aif"],
+    "fast": ["--fast-search", "--search-timeout", "2500"],
+}
+FORMAT_NAMES = {"flac": "FLAC", "aiff": "AIFF", "mp3": "MP3", "wav": "WAV", "keep": "their own format"}
+VIDEO_HOSTS = {"youtube.com": "youtube", "www.youtube.com": "youtube", "m.youtube.com": "youtube",
+               "music.youtube.com": "youtube", "youtu.be": "youtube", "soundcloud.com": "soundcloud",
+               "www.soundcloud.com": "soundcloud", "m.soundcloud.com": "soundcloud"}
+LINK_WORDS = {"youtube": "the YouTube video", "youtube-playlist": "the YouTube playlist",
+              "soundcloud": "the SoundCloud link", "mixcloud": "the Mixcloud show", "spotify": "the Spotify link",
+              "apple": "the Apple Music link", "link": "the link"}
 
 
 def child_env() -> dict:
@@ -88,10 +105,22 @@ def no_result_message(job: Job, code: int) -> str:
     return f"tl2mixxx exited with code {code} and no result{why}"
 
 
+def video_source(link: object) -> str:
+    """ "youtube" or "soundcloud" for a link picked from Find on YouTube (else bad_link)."""
+    import urllib.parse
+    if isinstance(link, str) and not has_control_chars(link) and len(link) <= 2000:
+        u = urllib.parse.urlsplit(link)
+        source = VIDEO_HOSTS.get((u.hostname or "").lower())
+        if u.scheme in ("https", "http") and source and not u.username:
+            return source
+    raise bad_request("link is an slsk:// link from a Soulseek search, or a YouTube or SoundCloud link from "
+                      "Find on YouTube.", "bad_link")
+
+
 class App:
     def __init__(self, data_dir: Path, *, music_dir: str | None = None, sockseek: str | None = None,
                  mixxx_login: Path | None = None, command: list[str] | None = None,
-                 stop_grace: float = 3.0, kill_after: float = 10.0):
+                 helper_command: list[str] | None = None, stop_grace: float = 3.0, kill_after: float = 10.0):
         self.data_dir = Path(data_dir).expanduser()
         self.work_dir = self.data_dir / "work"
         for sub in ("drafts", "uploads", "results"):
@@ -111,8 +140,15 @@ class App:
         self._pending_lock = threading.Lock()
         self.bus = EventBus()
         self.command = command or paths.tl2mixxx_command()
-        self.jobs = JobManager(self.bus, self.command, self.work_dir, child_env,
+        self.helper_command = helper_command or paths.helper_command()
+        self.ytdlp = Ytdlp(self.data_dir, self.helper_command, self.work_dir, self.child_env,
+                           on_change=lambda: self.bus.publish("state", self.state()))
+        self.jobs = JobManager(self.bus, self.command, self.work_dir, self.child_env,
                                stop_grace=stop_grace, kill_after=kill_after)
+
+    def child_env(self) -> dict:
+        """The environment of tl2mixxx and the helpers: with the updated yt-dlp, if there is one."""
+        return {**child_env(), **self.ytdlp.child_env()}
 
     def shutdown(self) -> None:
         self.jobs.shutdown()
@@ -149,15 +185,28 @@ class App:
         music = Path(s.music_dir)
         return {
             "app": {"name": APP_NAME, "version": __version__},
-            "settings": {"music_dir": s.music_dir, "sockseek": s.sockseek, "mashups": s.mashups},
+            "settings": {"music_dir": s.music_dir, "sockseek": s.sockseek, "mashups": s.mashups,
+                         "sources": s.sources, "quality": s.quality, "format": s.format, "tags": s.tags},
             "music_dir": {"path": s.music_dir, "exists": music.is_dir()},
             "login": self.login.status(),
             "sockseek": self.sockseek_status(),
+            "ytdlp": self.ytdlp.status(),
             "jobs": {"running": sum(j.state in ("running", "stopping") for j in self.jobs.jobs()),
                      "queued": sum(j.state == "queued" for j in self.jobs.jobs())},
             "limits": {"page_bytes": PAGE_LIMIT, "text_bytes": TEXT_LIMIT, "upload_bytes": UPLOAD_LIMIT,
                        "query_chars": MAX_QUERY},
         }
+
+    def update_ytdlp(self) -> dict:
+        self.ytdlp.start_update()
+        return self.ytdlp.status()
+
+    def revert_ytdlp(self) -> dict:
+        try:
+            self.ytdlp.revert()
+        except UpdateError as e:
+            raise conflict(str(e), "ytdlp_updating")
+        return self.ytdlp.status()
 
     def update_settings(self, changes: dict) -> dict:
         self.settings.update(changes)
@@ -173,6 +222,16 @@ class App:
         self.login.clear()
         self.bus.publish("state", self.state())
         return self.login.status()
+
+    def _plan(self) -> dict:
+        """What a download goes on with once Soulseek is done, from the settings when it's asked
+        for: YouTube for what's still missing, then cutting it from the recording, then finishing
+        the files (format and tags)."""
+        s = self.settings.get()
+        steps = [step for step, on in (("fallback", "youtube" in s.sources), ("cut", "mix" in s.sources),
+                                       ("finish", s.format != "keep" or s.tags)) if on]
+        return {"soulseek": "soulseek" in s.sources, "steps": steps, "quality": s.quality,
+                "format": s.format, "tags": s.tags}
 
     def _soulseek_args(self) -> tuple[list[str], list[str]]:
         """tl2mixxx's --sockseek option and what goes after "--" to sockseek: no progress bars
@@ -278,17 +337,109 @@ class App:
     # ------------------------------------------------------------------ drafts
 
     def create_draft_page(self, name: str, data: bytes) -> dict:
-        draft_id = self.drafts.create_page(name, data)
+        """A dropped file: a saved page, a .txt list, an Exportify .csv, a tracklist .json or a picture."""
+        kind = file_kind(name) or "page"
+        if kind == "text" or (kind == "page" and not data.strip()):
+            return self.get_draft(self.drafts.create_page(name, data))
+        if not data.strip():
+            raise bad_request("The file is empty.", "empty")
+        if kind == "page":
+            try:
+                return self.get_draft(self.drafts.create_page(name, data))
+            except ApiError as e:
+                if e.code != "not_a_tracklist":
+                    raise
+                # Not a 1001Tracklists page: a Spotify or Apple Music page, or any page with a list
+        if kind == "image":
+            check_image(data)
+        return self._resolve_file(name, data, kind)
+
+    def _resolve_file(self, name: str, data: bytes, kind: str) -> dict:
+        draft_id, folder = self.drafts.reserve()
+        try:
+            file_name = safe_name(name, "tracklist")
+            path = folder / "input" / file_name
+            path.parent.mkdir()
+            path.write_bytes(data)
+            out = folder / "tracklist.json"
+            timeout = OCR_TIMEOUT if kind == "image" else RESOLVE_TIMEOUT
+            try:
+                run_resolve(self.command, str(path), out, self.work_dir, self.child_env(), timeout)
+            except ApiError as e:
+                # macOS's text recognition can fail its first reading in a program new to it (while
+                # it compiles its models); a new process reads the picture
+                if kind != "image" or not e.message.startswith("Couldn't read the picture"):
+                    raise
+                run_resolve(self.command, str(path), out, self.work_dir, self.child_env(), timeout)
+            stem = Path(file_name).stem.replace("_", " ").strip() or "Tracklist"
+            self.drafts.finish_resolved(draft_id, out, {"kind": kind, "name": file_name, "url": ""}, stem)
+        except BaseException:
+            self.drafts.discard(draft_id)
+            raise
         return self.get_draft(draft_id)
 
     def create_draft_text(self, text: object, title: object = None) -> dict:
         draft_id = self.drafts.create_text(text, title)
         return self.get_draft(draft_id)
 
+    def resolve_input(self, text: object, title: object = None) -> tuple[dict | None, Job | None]:
+        """Paste anything: a link is read by a "resolve" job; anything else is text."""
+        if not isinstance(text, str) or not text.strip():
+            raise bad_request("Paste a link or a tracklist first.", "empty")
+        if title is not None and not isinstance(title, str):
+            raise bad_request("title is text.", "bad_title")
+        url = as_link(text)
+        if url is None:
+            return self.create_draft_text(text, title), None
+        return None, self.start_resolve(url, title or "")
+
+    def start_resolve(self, url: str, title: str = "") -> Job:
+        kind = link_kind(url)
+        if kind == "1001tracklists-link":
+            raise ApiError(422, "save_the_page", "1001Tracklists doesn't allow apps to read its pages: open the "
+                           "tracklist in your browser, save it (File > Save Page As) and drop the saved file here.")
+        draft_id, folder = self.drafts.reserve()
+        out = folder / "tracklist.json"
+        what = LINK_WORDS.get(kind, "the link")
+        job = Job(kind="resolve", title=f"Reading {what}", args=["resolve", url, f"--out={out}"])
+        if title.strip():
+            job.args.append(f"--title={' '.join(title.split())[:300]}")
+        job.finish = lambda j, code: self._finish_resolve(j, code, draft_id, out, {"kind": kind, "name": "", "url": url})
+        return self.jobs.submit(job)
+
+    def _finish_resolve(self, job: Job, code: int, draft_id: str, out: Path, origin: dict) -> tuple[str, str, dict | None]:
+        base = {"draft": None, "kind": origin["kind"], "url": origin["url"],
+                "help": SPOTIFY_HELP if origin["kind"] == "spotify" else ""}
+        if job.stop_requested or code == EXIT_STOPPED:
+            self.drafts.discard(draft_id)
+            return STOPPED, "Stopped.", base
+        if code != 0 or not out.is_file():
+            self.drafts.discard(draft_id)
+            why = error_text("\n".join(job.log)) or job.error or f"tl2mixxx exited with code {code}."
+            return FAILED, why, base
+        try:
+            self.drafts.finish_resolved(draft_id, out, origin, "Tracklist")
+            info = self.get_draft(draft_id)
+        except ApiError as e:
+            return FAILED, e.message, base
+        n = len(info["tracks"])
+        return DONE, f"Found {n} track{'s' if n != 1 else ''}.", dict(base, draft=draft_id, title=info["title"], count=n)
+
+    def pick_alternative(self, draft_id: object, pick: object) -> dict:
+        """Another of the tracklists resolve found (the comments of a video, say): no fetching again."""
+        page = self.drafts.page(draft_id)
+        if page.suffix.lower() != ".json":
+            raise conflict("This tracklist has no others to pick from.", "no_alternatives")
+        if not isinstance(pick, int) or isinstance(pick, bool) or pick < 0:
+            raise bad_request("pick is the number of one of the draft's alternatives.", "bad_pick")
+        run_resolve(self.command, str(page), page, self.work_dir, self.child_env(), RESOLVE_TIMEOUT,
+                    [f"--pick={pick}"])
+        return self.get_draft(draft_id)
+
     def get_draft(self, draft_id: object) -> dict:
         page = self.drafts.page(draft_id)
         info = draft_info(str(draft_id), self.drafts.source(str(draft_id)), page, self.music_dir(),
-                          self.settings.get().mashups)
+                          self.settings.get().mashups, self.drafts.meta(str(draft_id)).get("origin"))
         if info["set_exists"]:
             # What the set was downloaded with before
             info["mashups"] = self.mashups_for(music_root(self.music_dir()) / info["set"])
@@ -335,11 +486,15 @@ class App:
         running = self.jobs.active(key)
         if running is not None:
             return running, True
+        plan = self._plan()
+        if not plan["soulseek"]:
+            return self._download_elsewhere(folder, page, title, mashups, plan, key, new_set), False
         sockseek, after = self._soulseek_args()
         if not new_set:
             # A retry only searches for what's still missing, so it can afford to try harder:
             # without "feat." credits, without the artist, and by artist or title alone
             after += RETRY_SEARCH
+        after += QUALITY_ARGS[plan["quality"]]
         music.mkdir(parents=True, exist_ok=True)
         self.set_prefs.set_mashups(folder, mashups)
         job = Job(kind="download", title=title, args=[], soulseek=True, set_id=folder.name,
@@ -348,9 +503,147 @@ class App:
         job.args = ["run", str(page), "--no-mixxx", f"--music-dir={music}", f"--mashups={mashups}",
                     *extra, f"--result-json={result}", "--stop-on-eof", *sockseek, *after]
         job.finish = lambda j, code: self._finish_set_job(j, code, result, folder)
+        job.after = lambda j: self._continue(j, folder, plan)
         if new_set:
             self._add_pending(folder, tl, mashups, self.drafts.source(str(draft)))
         return self.jobs.submit(job), False
+
+    def _download_elsewhere(self, folder: Path, page: Path, title: str, mashups: str, plan: dict, key: str,
+                            new_set: bool) -> Job:
+        """Soulseek is turned off: the set's folder is made here (tl2mixxx run would make it),
+        and its tracks come from the other sources."""
+        if new_set:
+            folder.mkdir(parents=True, exist_ok=True)
+            cli.keep_page_copy(page, folder)
+            self.library.forget(folder)
+        self.set_prefs.set_mashups(folder, mashups)
+        job = self._next_step(folder, plan, key)
+        if new_set:
+            self.bus.publish("sets", {"set": folder.name, "reason": "download"})
+        if job is None:
+            needs = self._needs(folder, mashups)
+            if needs["missing"] == 0 and needs["cuttable"] == 0:
+                raise conflict("Every track that can be downloaded has a file.", "nothing_missing")
+            raise conflict("Soulseek is turned off in Settings, and there's nowhere else to get the tracks from: "
+                           "turn on YouTube, or Cut from the set for a set with a recording and times.", "no_sources")
+        return job
+
+    # ------------------------------------------------------------------ after Soulseek
+
+    def _needs(self, folder: Path, mashups: str) -> dict:
+        """What a set still needs: tracks without a file (IDs aside), the ones of those (and IDs)
+        that have a time to cut them out of a recording at, and whether it has a recording."""
+        tl = parse_file(cli.page_copy(folder))
+        try:
+            r = cli.resolve_set(folder, mashups=mashups)
+            found, missing = r.found, [t for t, _ in r.missing]
+        except cli.SkipSet:
+            found, missing = [], cli.choose_tracks(tl, mashups, {})
+        have = {t.index for t, _ in found}
+        ids = [t for t in select_tracks(tl, mashups=mashups, include_ids=True) if t.unidentified and t.index not in have]
+        cuttable = {t.index for t in [*missing, *ids] if t.cue is not None}
+        recording = web_recording(tl)
+        return {"found": len(found), "missing": sum(not t.unidentified for t in missing),
+                "cuttable": len(cuttable) if recording else 0, "recording": recording}
+
+    def _continue(self, job: Job, folder: Path, plan: dict) -> None:
+        """A job of a download ended: the next step, unless the user stopped it. A download that
+        Soulseek refused to log in for goes on (YouTube, the cut and finishing don't need it)."""
+        if job.stopped_by_user or (job.state == STOPPED and not job.login_failed):
+            return
+        self._next_step(folder, plan, job.key)
+
+    def _next_step(self, folder: Path, plan: dict, key: str) -> Job | None:
+        steps = list(plan["steps"])
+        while steps:
+            step = steps.pop(0)
+            if cli.page_copy(folder) is None:
+                return None     # the first download didn't get as far as making the set
+            rest = dict(plan, steps=steps)
+            job = self._step_job(step, folder, plan)
+            if job is not None:
+                job.key = key
+                job.after = lambda j, r=rest: self._continue(j, folder, r)
+                return self.jobs.submit(job)
+        return None
+
+    def _step_job(self, step: str, folder: Path, plan: dict) -> Job | None:
+        """The job for a step, or None when the set doesn't need it."""
+        mashups = self.mashups_for(folder)
+        needs = self._needs(folder, mashups)
+        title = self.library.summary(folder, mashups)["title"]
+        media = [f"--format={plan['format']}", *([] if plan["tags"] else ["--no-tags"])]
+        if step == "fallback" and needs["missing"]:
+            args = ["fallback", str(folder), "--missing", "--auto", *media]
+            if plan["quality"] == "fast":
+                args.append("--max-searches=1")
+            return self._media_job("fallback", title, folder, args, mashups, lane="youtube")
+        if step == "cut" and needs["cuttable"]:
+            return self._media_job("cut", title, folder, ["cut", str(folder), "--missing", *media], mashups,
+                                   lane="youtube")
+        if step == "finish" and needs["found"]:
+            args = ["finish", str(folder), "--all", f"--format={plan['format']}", *(["--tags"] if plan["tags"] else [])]
+            return self._media_job("finish", title, folder, args, mashups)
+        return None
+
+    def _media_job(self, kind: str, title: str, folder: Path, args: list[str], mashups: str, *,
+                   lane: str | None = None, row: int | None = None, lock: bool = True) -> Job:
+        """A tl2mixxx fallback / cut / finish job for a set."""
+        job = Job(kind=kind, title=title, args=[], lane=lane, set_id=folder.name, row=row,
+                  folder=str(folder) if lock else None)
+        result = self._result_path(job.id)
+        job.args = [*args, f"--mashups={mashups}", f"--result-json={result}", "--stop-on-eof"]
+        job.finish = lambda j, code: self._finish_media(j, code, result, folder)
+        return job
+
+    def _finish_media(self, job: Job, code: int, result_path: Path, folder: Path) -> tuple[str, str, dict | None]:
+        data = read_result(result_path)
+        listing = job.kind == "fallback" and "--auto" not in job.args
+        if not listing:
+            self.library.forget(folder)
+            self.bus.publish("sets", {"set": folder.name, "reason": job.kind})
+        if job.stop_requested or code == EXIT_STOPPED:
+            return STOPPED, "Stopped. Files already downloaded are kept.", data
+        if data is None:
+            return FAILED, no_result_message(job, code), None
+        errors = [str(e) for e in data.get("errors") or []]
+        done_something = False
+        if job.kind == "fallback":
+            tracks = data.get("tracks") or []
+            if listing:
+                found = tracks[0].get("candidates") or [] if tracks else []
+                sure = sum(1 for c in found if c.get("confidence") == "high")
+                message = (f"{len(found)} result(s) on YouTube and SoundCloud, {sure} that surely are the track."
+                           if found else "Nothing found on YouTube or SoundCloud.")
+                done_something = bool(found)
+            else:
+                taken = sum(1 for t in tracks if t.get("taken"))
+                done_something = taken > 0
+                message = (f"Found {taken} of {len(tracks)} missing track(s) on YouTube and SoundCloud."
+                           if tracks else "Nothing was missing.")
+        elif job.kind == "cut":
+            tracks = data.get("tracks") or []
+            cut = sum(1 for t in tracks if t.get("file"))
+            skipped = [t["skipped"] for t in tracks if t.get("skipped")]
+            done_something = cut > 0
+            message = f"Cut {cut} track(s) out of the set's recording." if cut else "Nothing was cut out of the recording."
+            if skipped:
+                message += f" {len(skipped)} skipped ({skipped[0]})."
+        else:
+            files = data.get("files") or []
+            converted = sum(1 for f in files if f.get("converted"))
+            tagged = sum(1 for f in files if f.get("tagged"))
+            done_something = bool(converted or tagged)
+            bits = []
+            if converted:
+                bits.append(f"converted {converted} file(s) to {FORMAT_NAMES.get(str(data.get('format')), data.get('format'))}")
+            if tagged:
+                bits.append(f"tagged {tagged}")
+            message = (", ".join(bits) + ".") if bits else "The files were finished already."
+            message = message[0].upper() + message[1:]
+        if errors:
+            message += " " + " ".join(f"Error: {e}" for e in errors[:3])
+        return (DONE if code == 0 or done_something else FAILED), message, dict(data, set=folder.name)
 
     def _add_pending(self, folder: Path, tl, mashups: str, source: str) -> None:
         total = len(cli.choose_tracks(tl, mashups, {}))
@@ -383,9 +676,12 @@ class App:
         if sum(bool(x) for x in (clear, upload, link or query)) != 1:
             raise bad_request('Give one of "link" (with "query" if it came from a search), "query", '
                               '"upload" or "clear".', "bad_fix")
+        if isinstance(link, str) and link.lower().startswith(("https://", "http://")):
+            return self._start_take(folder, row, identity, link, query)
         args = ["fix", str(folder), f"--track={row}", f"--expect-key={identity}"]
         cleanup = None
         soulseek = False
+        plan = self._plan()
         if clear:
             if clear is not True:
                 raise bad_request("clear is true or left out.", "bad_fix")
@@ -413,11 +709,98 @@ class App:
         if soulseek:
             sockseek, after = self._soulseek_args()
             args += sockseek
+            if not link:
+                after += QUALITY_ARGS[plan["quality"]]
         job = Job(kind="fix", title=f"{self._track_display(folder, row)}: {what}", args=[], soulseek=soulseek,
                   set_id=folder.name, folder=str(folder), row=row, cleanup=cleanup)
         result = self._result_path(job.id)
         job.args = args + [f"--result-json={result}", "--stop-on-eof", *after]
         job.finish = lambda j, code: self._finish_set_job(j, code, result, folder)
+        if not clear and "finish" in plan["steps"]:
+            job.after = lambda j: self._finish_track(j, folder, row, identity, plan)
+        return self.jobs.submit(job)
+
+    def _finish_track(self, job: Job, folder: Path, row: int, identity: str, plan: dict) -> None:
+        """After a fix: the track's new file in the set's format, with tags."""
+        if job.state != DONE:
+            return
+        args = ["finish", str(folder), f"--track={row}", f"--expect-key={identity}", f"--format={plan['format']}",
+                *(["--tags"] if plan["tags"] else [])]
+        self.jobs.submit(self._media_job("finish", f"{self._track_display(folder, row)}: finish", folder, args,
+                                         self.mashups_for(folder), row=row))
+
+    def _start_take(self, folder: Path, row: int, identity: str, link: str, query: object) -> Job:
+        """Download a video picked from Find on YouTube and use it for the track (helpers.py)."""
+        source = video_source(link)
+        plan = self._plan()
+        args = ["take", str(folder), f"--track={row}", f"--expect-key={identity}", f"--link={link}",
+                f"--source={source}", f"--format={plan['format']}", *([] if plan["tags"] else ["--no-tags"])]
+        if query is not None:
+            args.append(f"--query={check_query(query)}")
+        mashups = self.mashups_for(folder)
+        word = "video" if source == "youtube" else "track"
+        job = Job(kind="fix", title=f"{self._track_display(folder, row)}: download the picked {word}", args=[],
+                  lane="youtube", command=self.helper_command, set_id=folder.name, folder=str(folder), row=row)
+        result = self._result_path(job.id)
+        job.args = [*args, f"--mashups={mashups}", f"--result-json={result}", "--stop-on-eof"]
+        job.finish = lambda j, code: self._finish_set_job(j, code, result, folder)
+        return self.jobs.submit(job)
+
+    def _check_track(self, folder: Path, row: object, identity: object):
+        if not isinstance(row, int) or isinstance(row, bool) or row < 1:
+            raise bad_request("row is the track's row number.", "bad_row")
+        if not isinstance(identity, str) or not identity or has_control_chars(identity):
+            raise bad_request('identity is the track\'s "identity" from its tracks.', "bad_identity")
+        try:
+            tl = parse_file(cli.page_copy(folder))
+        except (ValueError, OSError, TypeError) as e:
+            raise ApiError(422, "not_a_tracklist", f"The set's page can't be read: {e}")
+        track = next((t for t in tl.tracks if t.index == row), None)
+        if track is None:
+            raise bad_request(f"The set has no row {row}.", "bad_row")
+        return tl, track
+
+    def start_track_fallback(self, set_id: object, row: object, identity: object) -> Job:
+        """Find on YouTube: YouTube Music, YouTube and SoundCloud results for one track, scored like
+        likely matches. Nothing is downloaded: a pick is a fix with its link."""
+        folder = set_folder(self.music_dir(), set_id)
+        tl, track = self._check_track(folder, row, identity)
+        if track.unidentified:
+            raise bad_request("An ID has no name to look for.", "bad_row")
+        args = ["fallback", str(folder), f"--track={row}", f"--expect-key={identity}", "--source=any"]
+        return self.jobs.submit(self._media_job("fallback", f"{track.display}: find on YouTube", folder, args,
+                                                self.mashups_for(folder), lane="youtube", row=row, lock=False))
+
+    def start_track_cut(self, set_id: object, row: object, identity: object) -> Job:
+        """Cut one track out of the set's recording, from its time to the next track's."""
+        folder = set_folder(self.music_dir(), set_id)
+        tl, track = self._check_track(folder, row, identity)
+        if not web_recording(tl):
+            raise conflict("This set has no recording to cut tracks out of.", "no_recording")
+        if track.cue is None:
+            raise conflict("The tracklist doesn't say when this track plays.", "no_cue")
+        plan = self._plan()
+        args = ["cut", str(folder), f"--track={row}", f"--expect-key={identity}", f"--format={plan['format']}",
+                *([] if plan["tags"] else ["--no-tags"])]
+        name = "ID" if track.unidentified else track.display
+        return self.jobs.submit(self._media_job("cut", f"{name}: cut from the set", folder, args,
+                                                self.mashups_for(folder), lane="youtube", row=row))
+
+    def start_finish(self, set_id: object) -> Job:
+        """Convert a set's files to the format in the settings and write their tags."""
+        folder = set_folder(self.music_dir(), set_id)
+        plan = self._plan()
+        if plan["format"] == "keep" and not plan["tags"]:
+            raise conflict("There's nothing to do: the output format is \"keep\" and tags are off in Settings.",
+                           "nothing_to_finish")
+        key = f"finish:{folder}"
+        running = self.jobs.active(key)
+        if running is not None:
+            return running
+        mashups = self.mashups_for(folder)
+        args = ["finish", str(folder), "--all", f"--format={plan['format']}", *(["--tags"] if plan["tags"] else [])]
+        job = self._media_job("finish", self.library.summary(folder, mashups)["title"], folder, args, mashups)
+        job.key = key
         return self.jobs.submit(job)
 
     def start_suggest(self, set_id: object, row: object = None, identity: object = None) -> Job:

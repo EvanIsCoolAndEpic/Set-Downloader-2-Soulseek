@@ -2,19 +2,24 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEven
 import {
   SparkleIcon,
   ArrowCounterClockwiseIcon,
+  ArrowSquareOutIcon,
   CheckCircleIcon,
   DownloadSimpleIcon,
   FolderOpenIcon,
   MagnifyingGlassIcon,
+  ScissorsIcon,
+  SealCheckIcon,
   StopIcon,
   UploadSimpleIcon,
   XCircleIcon,
   XIcon,
+  YoutubeLogoIcon,
 } from "@phosphor-icons/react";
 import { api, ApiError, errorText } from "../lib/api";
 import {
   AUDIO_EXTENSIONS,
   baseName,
+  buyLinks,
   duration,
   fixAction,
   isAudioFile,
@@ -27,6 +32,7 @@ import {
 } from "../lib/format";
 import { getData, useStore } from "../lib/store";
 import {
+  changesTrack,
   isActive,
   type Job,
   type LikelyFile,
@@ -34,6 +40,7 @@ import {
   type SearchResult,
   type SuggestJobResult,
   type Track,
+  type VideoResult,
 } from "../lib/types";
 import { Button, IconButton } from "./ui/Button";
 import { inputClass, FieldError } from "./ui/Field";
@@ -43,6 +50,8 @@ import { Bar, skeletonWidth } from "./ui/Skeleton";
 
 interface Props {
   setId: string;
+  /** The set has a recording to cut tracks out of. */
+  hasRecording: boolean;
   track: Track;
   closing: boolean;
   onClose: () => void;
@@ -51,9 +60,10 @@ interface Props {
   dropped: { file: File; nonce: number } | null;
 }
 
-/** Fix one track: search Soulseek with other words and pick a file, use a file of your own, or
- * undo the fix. Wording follows the Mixxx fork's Fix Tracks dialog. */
-export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }: Props) {
+/** Fix one track: search Soulseek with other words and pick a file, find it on YouTube, cut it out
+ * of the set's recording, use a file of your own, or undo the fix. Wording follows the Mixxx
+ * fork's Fix Tracks dialog. */
+export function FixPanel({ setId, hasRecording, track, closing, onClose, onSettings, dropped }: Props) {
   const jobs = useStore((d) => d.jobs);
   const uploadLimit = useStore((d) => d.state?.limits.upload_bytes ?? 0);
   const queryLimit = useStore((d) => d.state?.limits.query_chars ?? 300);
@@ -74,15 +84,17 @@ export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }
   const search = searchId ? jobs[searchId] : undefined;
   const fixJob = useMemo<Job | undefined>(() => {
     // A fix of this track that is running now, else the last one started here
-    const active = Object.values(jobs).find((j) => j.kind === "fix" && j.set === setId && j.row === track.row && isActive(j));
+    const active = Object.values(jobs).find((j) => changesTrack(j) && j.set === setId && j.row === track.row && isActive(j));
     return active ?? (fixId ? jobs[fixId] : undefined);
   }, [jobs, setId, track.row, fixId]);
   const fixing = !!fixJob && isActive(fixJob);
-  // A search's results, or the likely files a "find likely matches" job scored
+  // A search's results, or the files a "find likely matches" or "find on YouTube" job scored
   const done = search?.state === "done" ? search.result : null;
   const result = done && "results" in done ? (done as SearchJobResult) : null;
   const likely = done && "tracks" in done ? ((done as SuggestJobResult).tracks[0]?.candidates ?? []) : null;
-  const results: (SearchResult | LikelyFile)[] = likely ?? result?.results ?? [];
+  const results: (SearchResult | LikelyFile | VideoResult)[] = likely ?? result?.results ?? [];
+  const pickedResult = results.find((x) => x.link === picked);
+  const pickedVideo = !!pickedResult && "source" in pickedResult && !pickedResult.link.startsWith("slsk://");
 
   // Another track: start over, and stop a search that was for the old one
   useEffect(() => {
@@ -127,6 +139,28 @@ export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }
     try {
       const { job } = await api.suggest(setId, track.row, track.identity);
       setSearchId(job.id);
+    } catch (e) {
+      setError(asApiError(e));
+    }
+  }
+
+  async function findOnYoutube() {
+    setError(null);
+    setPicked(null);
+    if (search && isActive(search)) void api.stopJob(search.id).catch(() => {});
+    try {
+      const { job } = await api.findOnYoutube(setId, track.row, track.identity);
+      setSearchId(job.id);
+    } catch (e) {
+      setError(asApiError(e));
+    }
+  }
+
+  async function cutFromSet() {
+    setError(null);
+    try {
+      const { job } = await api.cutFromSet(setId, track.row, track.identity);
+      setFixId(job.id);
     } catch (e) {
       setError(asApiError(e));
     }
@@ -196,6 +230,7 @@ export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }
 
   const status = trackStatus(track);
   const needsLogin = error?.code === "login_required" || error?.code === "sockseek_missing";
+  const canCut = hasRecording && track.cue != null;
 
   return (
     <aside
@@ -279,6 +314,32 @@ export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }
             Find likely matches under other names
           </button>
         )}
+        {(!track.unidentified || canCut) && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {!track.unidentified && (
+              <Button
+                size="sm"
+                icon={<YoutubeLogoIcon size={14} aria-hidden />}
+                onClick={() => void findOnYoutube()}
+                disabled={!!search && isActive(search)}
+                title="Looks for the track on YouTube Music, YouTube and SoundCloud. Their audio is lossy (about 128 to 160 kbps)."
+              >
+                Find on YouTube
+              </Button>
+            )}
+            {canCut && (
+              <Button
+                size="sm"
+                icon={<ScissorsIcon size={14} aria-hidden />}
+                onClick={() => void cutFromSet()}
+                disabled={fixing}
+                title={`Cuts the track out of the set's recording, from ${duration(track.cue)} to the next track's time.`}
+              >
+                Cut from the set
+              </Button>
+            )}
+          </div>
+        )}
       </form>
 
       <div className="flex min-h-0 flex-1 flex-col">
@@ -313,7 +374,11 @@ export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }
             icon={<DownloadSimpleIcon size={15} />}
             disabled={!picked || fixing}
             onClick={() => void downloadPicked()}
-            title="Downloads this file into the set's folder and uses it for the track. A file that's there already is kept."
+            title={
+              pickedVideo
+                ? "Downloads its audio into the set's folder and uses it for the track. It's lossy: a retry still looks on Soulseek."
+                : "Downloads this file into the set's folder and uses it for the track. A file that's there already is kept."
+            }
           >
             Download selected
           </Button>
@@ -337,7 +402,22 @@ export function FixPanel({ setId, track, closing, onClose, onSettings, dropped }
             </Button>
           )}
         </div>
-        <p className="text-xs text-fg-3">Nothing right? Leave it missing. You can also drop an audio file here.</p>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-3">
+          <span>Nothing right? Leave it missing, drop an audio file here, or buy it:</span>
+          {!track.unidentified &&
+            buyLinks(track).map((b) => (
+              <button
+                key={b.name}
+                type="button"
+                onClick={() => void api.openUrl(b.url).catch((e) => setError(asApiError(e)))}
+                className="inline-flex items-center gap-1 rounded-sm font-medium text-accent-fg hover:underline"
+                title={`Search ${b.name} for ${track.display}`}
+              >
+                {b.name}
+                <ArrowSquareOutIcon size={11} aria-hidden />
+              </button>
+            ))}
+        </div>
         <input
           ref={fileRef}
           type="file"
@@ -372,13 +452,17 @@ function SearchState({ job, count, hasDuration }: { job?: Job; count: number; ha
   if (!job) return null;
   let text: string;
   let tone = "text-fg-2";
-  if (job.state === "queued") {
+  if (job.state === "queued" && job.waiting !== "youtube") {
     text =
       job.waiting === "soulseek"
         ? `Waiting for the download that's running to finish...${job.ahead ? ` (${job.ahead} ahead)` : ""}`
         : "Starting the search...";
+  } else if (job.state === "queued" && job.waiting === "youtube") {
+    text = `Waiting for the YouTube job that's running to finish...${job.ahead ? ` (${job.ahead} ahead)` : ""}`;
   } else if (job.state === "running" && job.kind === "suggest") {
     text = "Trying other names on Soulseek, broadest last...";
+  } else if (job.state === "running" && job.kind === "fallback") {
+    text = job.progress?.text ? `Looking on YouTube Music, YouTube and SoundCloud: ${job.progress.text}...` : "Looking on YouTube Music, YouTube and SoundCloud...";
   } else if (job.state === "running") {
     text = `Searching Soulseek for "${(job.title.match(/^Search: "(.*)"$/) ?? [])[1] ?? ""}"...`;
   } else if (job.state === "stopping") {
@@ -424,7 +508,7 @@ function Results({
   onChoose,
   trackDuration,
 }: {
-  results: (SearchResult | LikelyFile)[];
+  results: (SearchResult | LikelyFile | VideoResult)[];
   picked: string | null;
   onPick: (link: string) => void;
   onChoose: () => void;
@@ -480,7 +564,7 @@ function Results({
               </span>
             )}
             <span className="grid grid-cols-[minmax(0,1.1fr)_auto_auto_minmax(0,1fr)] items-center gap-x-3 font-mono tabular text-2xs text-fg-2">
-              <span className="truncate">{quality(r)}</span>
+              <span className="truncate">{"source" in r && !r.link.startsWith("slsk://") && !r.bitrate ? "Lossy" : quality(r)}</span>
               <span
                 className={match === "match" ? "text-ok" : match === "differs" ? "text-warn" : ""}
                 title={lengthTip(r.length, trackDuration) || undefined}
@@ -488,13 +572,20 @@ function Results({
                 {r.length ? duration(r.length) : "-:--"}
               </span>
               <span>{size(r.size)}</span>
-              <span
-                className="truncate text-right"
-                title={r.free_slot ? "Has a free upload slot: downloads right away" : "No free upload slot: the download may wait in a queue"}
-              >
-                {r.user}
-                {!r.free_slot && <span className="text-fg-3"> (queue)</span>}
-              </span>
+              {"source" in r && !r.link.startsWith("slsk://") ? (
+                <span className="flex min-w-0 items-center justify-end gap-1 truncate text-right" title={r.uploader || r.user}>
+                  {r.official && <SealCheckIcon size={12} className="shrink-0 text-accent-fg" aria-label="Official upload" />}
+                  {r.source === "soundcloud" ? "SoundCloud" : "YouTube"}
+                </span>
+              ) : (
+                <span
+                  className="truncate text-right"
+                  title={r.free_slot ? "Has a free upload slot: downloads right away" : "No free upload slot: the download may wait in a queue"}
+                >
+                  {r.user}
+                  {!r.free_slot && <span className="text-fg-3"> (queue)</span>}
+                </span>
+              )}
             </span>
           </div>
         );
@@ -510,7 +601,7 @@ const CONFIDENCE = {
 } as const;
 
 const RUNNING_WORDS = {
-  pick: () => "Downloading the picked file...",
+  pick: (title: string) => (/(video|track)$/.test(title) ? "Downloading its audio..." : "Downloading the picked file..."),
   search: (title: string) => `Searching again for "${(title.match(/search again for "(.*)"$/) ?? [])[1] ?? ""}"...`,
   own: (title: string) => `Using ${title.replace(/^.*: use /, "")}...`,
   undo: () => "Undoing the fix...",
@@ -520,16 +611,24 @@ const RUNNING_WORDS = {
 function FixProgress({ job }: { job: Job }) {
   const last = useStore((d) => d.logs[job.id]?.lines.at(-1));
   if (isActive(job)) {
+    const running =
+      job.kind === "cut"
+        ? "Cutting it out of the set's recording..."
+        : job.kind === "finish"
+          ? "Converting the file and writing its tags..."
+          : RUNNING_WORDS[fixAction(job.title)](job.title);
     const what =
       job.state === "queued"
         ? job.waiting === "soulseek"
           ? "Waiting for the download that's running to finish..."
-          : job.waiting === "set"
-            ? "Waiting for the set's other job to finish..."
-            : "Starting..."
+          : job.waiting === "youtube"
+            ? "Waiting for the YouTube job that's running to finish..."
+            : job.waiting === "set"
+              ? "Waiting for the set's other job to finish..."
+              : "Starting..."
         : job.state === "stopping"
           ? "Stopping..."
-          : RUNNING_WORDS[fixAction(job.title)](job.title);
+          : running;
     return (
       <div className="anim-fade flex flex-col gap-1.5">
         <div className="flex items-center gap-2 text-xs text-fg">
@@ -540,7 +639,14 @@ function FixProgress({ job }: { job: Job }) {
             </Button>
           )}
         </div>
-        {job.state === "running" && <div className="progress" role="progressbar" aria-label={what} />}
+        {job.state === "running" &&
+          (job.progress ? (
+            <div className="meter" role="progressbar" aria-label={what} aria-valuenow={Math.round(job.progress.fraction * 100)}>
+              <span style={{ transform: `scaleX(${job.progress.fraction})` }} />
+            </div>
+          ) : (
+            <div className="progress" role="progressbar" aria-label={what} />
+          ))}
         {last && job.state === "running" && <p className="truncate font-mono text-2xs text-fg-3">{last}</p>}
       </div>
     );

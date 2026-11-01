@@ -1,9 +1,9 @@
 # Set Downloader API
 
 The window (pywebview) shows the built UI from `web/dist`, served by a small Python HTTP server on
-`127.0.0.1` at a free port. The UI talks to that server through the JSON API below. tl2mixxx and
-sockseek do the work: every download, search and fix is a tl2mixxx process that the server runs
-and streams to the page.
+`127.0.0.1` at a free port. The UI talks to that server through the JSON API below. tl2mixxx,
+sockseek, yt-dlp and ffmpeg do the work: every download, search, fix and reading of a link is a
+tl2mixxx process (or one of the app's own helpers) that the server runs and streams to the page.
 
 Everything here is relative to the page's own origin (`/api/...`), so the UI never needs to know
 the port.
@@ -14,12 +14,14 @@ the port.
 - [Endpoints at a glance](#endpoints-at-a-glance)
 - [State and settings](#state-and-settings)
 - [Soulseek login](#soulseek-login)
-- [Drafts: a dropped page or pasted text](#drafts-a-dropped-page-or-pasted-text)
-- [Downloads](#downloads)
+- [Drafts: paste anything](#drafts-paste-anything)
+- [Downloads](#downloads) (and [what comes after Soulseek](#after-soulseek-youtube-the-recording-finishing))
 - [Sets](#sets)
 - [Searching Soulseek](#searching-soulseek)
 - [Fixing a track](#fixing-a-track)
+- [Find on YouTube, cut from the set, finish files](#find-on-youtube-cut-from-the-set-finish-files)
 - [Uploads](#uploads-the-users-own-audio-file)
+- [yt-dlp](#yt-dlp)
 - [Jobs](#jobs)
 - [Live events (SSE)](#live-events-server-sent-events)
 - [Show in Finder, open a link](#show-in-finder-open-a-link)
@@ -95,8 +97,8 @@ timing, the browser may report that as a network error instead of the 413.
 
 | What | Limit |
 |---|---|
-| A dropped page (`POST /api/drafts/page`) | 20 MB (`limits.page_bytes`) |
-| Pasted text, as JSON (`POST /api/drafts/text`) | 2 MB (`limits.text_bytes`) |
+| A dropped file: page, list, CSV, JSON or picture (`POST /api/drafts/page`) | 20 MB (`limits.page_bytes`) |
+| Pasted text or a link, as JSON (`POST /api/drafts/text`, `POST /api/drafts/resolve`) | 2 MB (`limits.text_bytes`) |
 | An audio file (`POST /api/uploads`) | 600 MB (`limits.upload_bytes`) |
 | Any other JSON body | 256 KB |
 | A Soulseek search | 300 characters (`limits.query_chars`) |
@@ -117,8 +119,27 @@ What this means for the UI:
 - Don't use inline `<script>` tags. Vite's normal build output is fine.
 - Inline styles are allowed.
 
-Track names come from web pages and from Soulseek, so treat them as untrusted text and render them
-as text (React does this by default).
+Track names come from web pages, comments, pictures and Soulseek, so treat them as untrusted text
+and render them as text (React does this by default).
+
+### What the page sends is checked
+
+- Links to read (`POST /api/drafts/resolve`) must be `http(s)://` addresses on the web: no other
+  scheme, no user name in them, no IP addresses, `localhost` or `.local` names, and no name that
+  resolves to the Mac or the local network (`localtest.me`). A `spotify:` URI is turned into its
+  `https://open.spotify.com/...` page.
+- Where a link redirects, and every address tl2mixxx and the app's helper fetch (pages, videos,
+  recordings, covers named in a shared tracklist), is checked when the connection is made: only
+  addresses on the internet, never loopback or the local network. A proxy set in macOS is still used.
+- A tracklist's `recording` is used only when it's a web address (a shared `.json` can't point the
+  cut at a file on the Mac).
+- Nothing the page sends reaches tl2mixxx as a path: dropped files are written into the draft's
+  own folder first, and pasted text that isn't one link is parsed as text (a path pasted in is
+  just text, never opened).
+- Pictures must be PNG, JPEG or HEIC by their first bytes.
+- Links picked from Find on YouTube must be YouTube or SoundCloud addresses.
+- `yt-dlp` updates come only from GitHub over HTTPS (redirects checked), must match the release's
+  SHA2-256SUMS and must import in a child before they're used.
 
 ---
 
@@ -130,15 +151,22 @@ as text (React does this by default).
 | PUT | `/api/settings` | Change settings |
 | PUT | `/api/login` | Save the Soulseek login |
 | DELETE | `/api/login` | Forget the app's Soulseek login |
-| POST | `/api/drafts/page?name=…` | A dropped page or `.txt` file (raw body) → draft |
+| POST | `/api/drafts/resolve` | Paste anything: a link (read by a `resolve` job) or text → draft |
+| POST | `/api/drafts/page?name=…` | A dropped file (raw body): page, `.txt`, Exportify `.csv`, `.json`, picture → draft |
 | POST | `/api/drafts/text` | Pasted text → draft |
 | GET | `/api/drafts/{id}` | A draft, recomputed |
 | DELETE | `/api/drafts/{id}` | Throw a draft away |
-| POST | `/api/downloads` | Download a draft's set, or retry a set |
+| POST | `/api/drafts/{id}/pick` | Take another of the tracklists a link gave |
+| POST | `/api/downloads` | Download a draft's set, or retry a set (Soulseek, then YouTube, the recording, finishing) |
 | GET | `/api/sets` | Every set in the music folder |
 | GET | `/api/sets/{set}` | One set |
 | GET | `/api/sets/{set}/tracks` | A set's tracks, with the file each one has |
-| POST | `/api/sets/{set}/tracks/{row}/fix` | Fix one track |
+| POST | `/api/sets/{set}/tracks/{row}/fix` | Fix one track (a Soulseek result, a picked video, a search, a file, undo) |
+| POST | `/api/sets/{set}/tracks/{row}/suggest` | Likely files under other names on Soulseek |
+| POST | `/api/sets/{set}/suggest` | Find renamed tracks for every missing track |
+| POST | `/api/sets/{set}/tracks/{row}/fallback` | Find on YouTube (YouTube Music, YouTube, SoundCloud) |
+| POST | `/api/sets/{set}/tracks/{row}/cut` | Cut one track out of the set's recording |
+| POST | `/api/sets/{set}/finish` | Convert a set's files and write their tags |
 | POST | `/api/searches` | Search Soulseek (a queued job) |
 | POST | `/api/uploads?name=…` | Upload an audio file of the user's own (raw body) |
 | DELETE | `/api/uploads/{id}` | Throw an upload away |
@@ -148,6 +176,8 @@ as text (React does this by default).
 | GET | `/api/events` | Live events (Server-Sent Events) |
 | POST | `/api/reveal` | Show a set or file in the Finder |
 | POST | `/api/open-url` | Open a web address in the browser |
+| POST | `/api/ytdlp/update` | Update yt-dlp from its GitHub releases |
+| DELETE | `/api/ytdlp/update` | Use the built-in yt-dlp again |
 
 `{set}` is a set's id, its folder name, URL-encoded (`encodeURIComponent`). `{id}` values are
 generated by the server.
@@ -161,10 +191,13 @@ generated by the server.
 ```json
 {
   "app": {"name": "Set Downloader", "version": "0.1.0"},
-  "settings": {"music_dir": "/Users/you/Music/1001Tracklists", "sockseek": "", "mashups": "components"},
+  "settings": {"music_dir": "/Users/you/Music/1001Tracklists", "sockseek": "", "mashups": "components",
+               "sources": ["soulseek", "youtube", "mix"], "quality": "best", "format": "keep", "tags": true},
   "music_dir": {"path": "/Users/you/Music/1001Tracklists", "exists": true},
   "login": {"source": "mixxx", "username": null, "path": "/Users/you/Library/Application Support/Mixxx/1001tracklists-sockseek.conf"},
   "sockseek": {"path": "/opt/homebrew/bin/sockseek", "source": "automatic", "setting": "", "found": true, "error": null},
+  "ytdlp": {"version": "2026.10.26", "source": "bundled", "bundled": "2026.10.26", "updated": null,
+            "updating": false, "step": "", "message": "", "error": "", "checked": null},
   "jobs": {"running": 1, "queued": 0},
   "limits": {"page_bytes": 20971520, "text_bytes": 2097152, "upload_bytes": 629145600, "query_chars": 300}
 }
@@ -175,6 +208,18 @@ generated by the server.
     folder the Mixxx fork and tl2mixxx use, so sets already downloaded there show up.
   - `sockseek`: `""` means find it automatically.
   - `mashups`: the default for new sets (see [Mashups](#mashups)).
+  - `sources`: where tracks come from, the ones turned on, always in this order: `"soulseek"`,
+    `"youtube"` (YouTube Music, YouTube and SoundCloud), `"mix"` (cut out of the set's
+    recording). See [After Soulseek](#after-soulseek-youtube-the-recording-finishing).
+  - `quality`: what Soulseek downloads. `"lossless"` (only FLAC, WAV, AIFF: sockseek
+    `--format flac,wav,aiff,aif --pref-format flac`), `"best"` (lossless preferred:
+    `--pref-format flac,wav,aiff,aif`) or `"fast"` (the first good file: `--fast-search
+    --search-timeout 2500`, and one YouTube search per track instead of two). A file picked from a
+    search is downloaded whatever this says.
+  - `format`: what a set's files end up as: `"keep"`, `"flac"`, `"aiff"`, `"mp3"` (320 kbps) or
+    `"wav"` (tl2mixxx `finish --format`; also how YouTube downloads and cuts are saved).
+  - `tags`: write names, the set as the album, the position as the track number, where the file
+    came from and a cover.
 - `music_dir.exists`: `false` until the first download creates the folder.
 - `login`: see [Soulseek login](#soulseek-login).
 - `sockseek`: the program that is used.
@@ -182,6 +227,7 @@ generated by the server.
     `"bundled"` (the copy inside the app), or `null` when none was found.
   - When `found` is `false`, `error` says why (for example, the path in the settings doesn't exist).
     Downloads and searches then fail with `409 sockseek_missing`.
+- `ytdlp`: the yt-dlp tl2mixxx uses (see [yt-dlp](#yt-dlp)).
 - `jobs`: how many jobs are running (including stopping) and how many are queued.
 
 ### `PUT /api/settings`
@@ -189,13 +235,18 @@ generated by the server.
 Send any subset of the settings:
 
 ```json
-{"music_dir": "/Volumes/Music/Sets", "sockseek": "", "mashups": "both"}
+{"music_dir": "/Volumes/Music/Sets", "sockseek": "", "mashups": "both",
+ "sources": ["youtube", "mix"], "quality": "lossless", "format": "aiff", "tags": true}
 ```
 
 - `music_dir`: a full path. `~/…` is expanded. It doesn't have to exist yet, but it can't be a file
   or `/`.
 - `sockseek`: a full path to an executable file, or `""` to find it automatically.
 - `mashups`: `"components"`, `"original"` or `"both"`.
+- `sources`: a list of `"soulseek"`, `"youtube"`, `"mix"` (any order; it's kept in that order).
+  An empty list is allowed (nothing can be downloaded then: say so).
+- `quality`: `"lossless"`, `"best"` or `"fast"`. `format`: `"keep"`, `"flac"`, `"aiff"`, `"mp3"`,
+  `"wav"`. `tags`: `true` or `false`.
 
 The response is `200` with the whole state, as `GET /api/state` returns it. A `state` event is sent
 too. Jobs that are already queued or running keep the settings they started with.
@@ -205,6 +256,7 @@ too. Jobs that are already queued or running keep the settings they started with
 | 400 | `bad_music_dir` | Not a full path, `/`, an existing file, or has control characters |
 | 400 | `bad_sockseek` | Not a full path, or no executable file there |
 | 400 | `bad_mashups` | Not one of the three choices |
+| 400 | `bad_sources`, `bad_quality`, `bad_format`, `bad_tags` | Not one of the choices above |
 | 400 | `unknown_setting` | Any other key |
 
 ### Mashups
@@ -268,29 +320,87 @@ Forgets the app's own login. The Mixxx fork's file is used again if there is one
 
 ---
 
-## Drafts: a dropped page or pasted text
+## Drafts: paste anything
 
-A draft is a parsed tracklist that hasn't been downloaded yet. The UI shows it, the user picks the
-mashups choice, and then starts the download. Drafts live in the app's scratch folder and are
-removed after 3 days.
+A draft is a parsed tracklist that hasn't been downloaded yet. The UI shows it, where it came from
+and, when a link gave several, the other tracklists to pick from; the user picks the mashups
+choice, and then starts the download. Drafts live in the app's scratch folder and are removed
+after 3 days.
+
+Anything that isn't a saved 1001Tracklists page or plain text is read by `tl2mixxx resolve`, and
+the draft keeps the tracklist JSON it made. A set downloaded from it keeps that JSON as
+`_tracklist.json` (a saved page stays `_tracklist.html`, text `_tracklist.txt`).
+
+### `POST /api/drafts/resolve`
+
+One input for anything pasted: a link or a tracklist.
+
+```json
+{"input": "https://www.youtube.com/watch?v=abcdefghijk", "title": "optional"}
+```
+
+- **A link** (one line, no spaces: `https://...`, `www.x.com/...`, `x.com/...` or
+  `spotify:playlist:...`): YouTube or SoundCloud (the description, the chapters and the top
+  comments, ranked; a playlist becomes one track per video), Mixcloud, Spotify and Apple Music
+  playlists and albums, any other page yt-dlp reads. Reading one takes a while (comments: up to
+  30 seconds), so it's a `resolve` [job](#jobs): `202 {"job": {...}}`. When the job is `done`, its
+  `result.draft` is the new draft's id (`GET /api/drafts/{id}`). When it `failed`, its `message`
+  says why in tl2mixxx's words, and for a Spotify link `result.help` says how to use Exportify
+  instead (show it with a button that opens `https://exportify.app`). Stopping it throws the
+  draft away.
+- **Anything else** is a pasted tracklist, read at once: `201 {"draft": {...}}`, as
+  `POST /api/drafts/text` would.
+
+The `resolve` job's `result`:
+
+```json
+{"draft": "9f1c2ab04d7e3f10", "kind": "youtube", "url": "https://www.youtube.com/watch?v=abcdefghijk",
+ "help": "", "title": "Kettle | Rooftop Session", "count": 24}
+```
+
+`kind` is what the link is: `youtube`, `youtube-playlist`, `soundcloud`, `mixcloud`, `spotify`,
+`apple` or `link`. On failure, `draft` is `null` and there's no `title` or `count`.
+
+| Status | code | When |
+|---|---|---|
+| 400 | `empty` | Nothing pasted |
+| 400 | `bad_title` | `title` isn't a string |
+| 400 | `bad_url` | A link that isn't on the web: another scheme (`file:`, `ftp:`...), an IP address, `localhost`, a `.local` name or one that resolves to the Mac or the local network, a user name in it |
+| 413 | `too_large` | Over 2 MB |
+| 422 | `save_the_page` | A 1001Tracklists link: their terms don't allow fetching pages. `message` says to save the page and drop it |
+| 422 | `not_a_tracklist` | Text with no track lines |
+
+Help wording for Spotify, from the UI: "Spotify playlists over 100 tracks: export them with
+Exportify and drop the .csv here."
 
 ### `POST /api/drafts/page?name={file name}`
 
-The body is the dropped file's raw bytes: a page saved from 1001Tracklists (`.html`, `.htm`, any
-encoding), or a tracklist saved as `.txt`. `name` is the file's name, URL-encoded. A name ending in
-`.txt` is read as text; anything else is read as a page.
+The body is the dropped file's raw bytes. `name` is the file's name, URL-encoded; its extension
+says what it is:
+
+| Extension | Read as |
+|---|---|
+| `.html`, `.htm` | A page saved from 1001Tracklists (any encoding). Another page (a saved Spotify or Apple Music page, any page with a list) goes to `tl2mixxx resolve` |
+| `.txt` | A tracklist as text (also UTF-16, like rekordbox's playlist export), an M3U playlist or a CUE sheet |
+| `.csv` | An Exportify export (tracks; saved albums are listed but not downloaded yet), or any CSV with artist and title columns. The set is named after the file (`Liked_Songs.csv` is "Liked Songs") |
+| `.json` | A tracklist JSON (`tl2mixxx resolve`'s, or any `{"title", "tracks": [{"artist", "title"}]}`) |
+| `.png`, `.jpg`, `.jpeg`, `.heic`, `.heif` | A screenshot of a tracklist, read with macOS Vision. Named after the file. Takes a few seconds; the first picture after the app was installed or updated takes about half a minute (Vision compiles its models), and if Vision fails that first reading the app reads it once more, in a new process |
+| anything else | A page |
 
 ```js
 await fetch(`/api/drafts/page?name=${encodeURIComponent(file.name)}`, {method: "POST", headers, body: file})
 ```
 
-The response is `201` with a [draft](#the-draft-object).
+The response is `201` with a [draft](#the-draft-object). A picture pasted from the clipboard has no
+name: give it one, e.g. `Screenshot 2026-10-31 at 21.04.png`.
 
 | Status | code | When |
 |---|---|---|
 | 400 | `empty` | The file is empty |
 | 413 | `too_large` | Over 20 MB |
-| 422 | `not_a_tracklist` | No tracks found. `message` explains how to save the page properly |
+| 415 | `not_an_image` | A picture's name, but not a PNG, JPEG or HEIC file |
+| 422 | `not_a_tracklist` | No tracks found. `message` says why (tl2mixxx's words), e.g. how to save the page properly |
+| 504 | `resolve_timeout` | Reading it took too long (45 s, a picture 180 s) |
 
 ### `POST /api/drafts/text`
 
@@ -318,6 +428,22 @@ The response is `201` with a [draft](#the-draft-object).
 Placeholder and help wording from the Mixxx fork: "Paste the tracklist: the set's name on the first
 line, then one track per line, like "01. Artist - Title [LABEL]" or "w/ Artist - Title" for a track
 played on top."
+
+### `POST /api/drafts/{id}/pick`
+
+```json
+{"pick": 1}
+```
+
+Takes another of the tracklists a link gave (`alternatives[].pick`), without reading the link
+again. The response is `200` with the draft.
+
+| Status | code | When |
+|---|---|---|
+| 400 | `bad_pick` | Not a whole number from 0 |
+| 404 | `no_draft` | No such draft |
+| 409 | `no_alternatives` | A saved page or text: nothing to pick from |
+| 422 | `not_a_tracklist` | No such alternative (`message` says how many there are) |
 
 ### `GET /api/drafts/{id}`
 
@@ -348,6 +474,15 @@ The response is `200 {"ok": true}`.
   "has_mashups": true,
   "unidentified": 2,
   "counts": {"components": 7, "original": 6, "both": 8},
+  "kind": "1001tracklists",
+  "origin": {},
+  "picked": 0,
+  "from": null,
+  "alternatives": [],
+  "warnings": [],
+  "recording": "",
+  "cues": 2,
+  "albums": 0,
   "tracks": [
     {"row": 1, "number": "01", "kind": "track", "artist": "Northern Lights & Kettle ft. Mara",
      "title": "Fog Machine (Extended Mix)", "display": "Northern Lights & Kettle ft. Mara - Fog Machine (Extended Mix)",
@@ -368,7 +503,7 @@ The response is `200 {"ok": true}`.
 
 | Field | Meaning |
 |---|---|
-| `source` | `"page"` (a saved page) or `"text"` (pasted, or a `.txt` file) |
+| `source` | `"page"` (a saved 1001Tracklists page), `"text"` (pasted, or a `.txt` file) or `"resolved"` (anything else, kept as tl2mixxx's JSON) |
 | `title` | The set's name |
 | `url` | The page's 1001Tracklists address, or `""` |
 | `set` | The id the set will have (its folder name in the music folder) |
@@ -377,7 +512,21 @@ The response is `200 {"ok": true}`.
 | `has_mashups` | Show the mashups choice only when this is `true` |
 | `unidentified` | How many rows are IDs |
 | `counts` | How many tracks get a file under each choice. A track played twice counts twice, but is downloaded once |
+| `kind` | Where the tracklist came from: `1001tracklists`, `youtube`, `soundcloud`, `mixcloud`, `exportify`, `spotify`, `apple`, `text`, `image` (a picture), `csv`, `web`, or `""` |
+| `origin` | What was read: `{"kind": "youtube" \| "csv" \| "image" \| "json" \| "page" \| ..., "name": "<file>", "url": "<link>"}`. `{}` for a saved 1001Tracklists page and text |
+| `alternatives` | When a link gave several tracklists (the description, the chapters, each comment, comments pieced together): `{pick, source, label, count, cues, likes, author, pinned, by_uploader, score}` each, best first, without their tracks. Empty when there was only one |
+| `picked` | Which alternative this is (`POST /api/drafts/{id}/pick` changes it) |
+| `from` | The taken alternative's `{source, label}`: `source` is `description`, `chapters`, `comment`, `comments` (pieced together from several) or `sections` (Mixcloud's own list); `label` is e.g. `"comment by @x (820 likes, pinned)"`. Also set when it was the only one; there `source` can also be `playlist`, `text`, `csv`, `image`, `page`, `json`, `spotify` or `apple`. `null` for a saved 1001Tracklists page or pasted text read without `resolve` |
+| `warnings` | Things to tell the user, e.g. "Spotify's page only lists the first 100 tracks: ..." or "Read from a picture: check the names." |
+| `recording` | The set's recording (the video a list came from) when it's a web address, or `""`. Tracks with a `cue` can be cut out of it |
+| `cues` | How many rows have a time |
+| `albums` | How many rows are whole albums (`kind: "album"`, from saved albums): listed, not downloaded |
 | `tracks` | Every row of the page, in order |
+
+How the UI says where a list came from: "From the comments on {title}, 24 tracks with times",
+"From the description of {title}", "Pieced together from the comments on {title}", "Exportify:
+Liked Songs, 312 tracks", "Spotify: {title}", "From a screenshot", "From pasted text", "From a saved
+1001Tracklists page".
 
 Each track has:
 
@@ -385,7 +534,7 @@ Each track has:
 |---|---|
 | `row` | Its row on the page (1-based, counting every row) |
 | `number` | What the page shows: `"01"`, `"w/"`, or `""` for a mashup's parts |
-| `kind` | `"track"`, `"with"` (a `w/` row), `"mashup"`, or `"component"` (a part of the mashup at row `mashup_of`) |
+| `kind` | `"track"`, `"with"` (a `w/` row), `"mashup"`, `"component"` (a part of the mashup at row `mashup_of`), or `"album"` (a whole album: not downloaded) |
 | `display` | `"Artist - Title"` |
 | `label` | The record label, or `""` |
 | `duration` | Seconds, or `null` |
@@ -414,11 +563,13 @@ To retry a set (search again for what's still missing):
 `mashups` is optional. It defaults to the set's own choice, or the setting for a new set, and is
 remembered for the set.
 
-This queues a `download` [job](#the-job-object) in the Soulseek queue.
+This queues a `download` [job](#the-job-object) in the Soulseek queue, and when it ends, the steps
+[after Soulseek](#after-soulseek-youtube-the-recording-finishing). With Soulseek turned off in the
+settings, the first job is one of those steps instead.
 
 - `202 {"job": {...}, "already_queued": false}` when a new job was queued.
-- `200 {"job": {...}, "already_queued": true}` when this set already has a queued or running
-  download. The response is that job, and nothing new is queued.
+- `200 {"job": {...}, "already_queued": true}` when this set's download (or a step after it) is
+  queued or running. The response is that job, and nothing new is queued.
 
 While a new set's first download is queued or running, it is already listed in `GET /api/sets`
 with `"pending": true`.
@@ -429,7 +580,8 @@ A download writes this into `<music dir>/<set>/`:
 - `<set>.m3u8`, a playlist in set order,
 - `_missing.csv`,
 - sockseek's `_index.csv`,
-- a copy of the page (`_tracklist.html` or `_tracklist.txt`).
+- a copy of the page (`_tracklist.html`, `_tracklist.txt`, or `_tracklist.json` for anything
+  `tl2mixxx resolve` read).
 
 | Status | code | When |
 |---|---|---|
@@ -439,12 +591,47 @@ A download writes this into `<music dir>/<set>/`:
 | 403 | `outside_music_dir` | The set's folder isn't inside the music folder (a link to elsewhere) |
 | 404 | `no_draft` | No such draft |
 | 404 | `not_found` | No such set |
-| 409 | `login_required` | No Soulseek login |
-| 409 | `sockseek_missing` | sockseek wasn't found |
+| 409 | `login_required` | No Soulseek login (Soulseek is on) |
+| 409 | `sockseek_missing` | sockseek wasn't found (Soulseek is on) |
+| 409 | `no_sources` | Soulseek is off, and neither YouTube nor cutting from the recording can get anything (both off, or no recording with times) |
+| 409 | `nothing_missing` | Soulseek is off, and every track that can be downloaded has a file |
 | 422 | `not_a_tracklist` | The draft can't be parsed anymore |
 
 Wording from the Mixxx fork: "Retrying only searches for what's still missing, then rebuilds the
 playlist in set order. Downloads that finish later on Soulseek can be picked up just by retrying."
+
+### After Soulseek: YouTube, the recording, finishing
+
+When a download job ends (not when the user stopped it), the set goes on through the sources
+turned on in the settings, as queued jobs of their own, one after the other. That includes a
+download that failed because Soulseek refused the login: the steps after it don't need it.
+
+Such a download ends `failed`, its `error` and `message` saying why. A wrong password is
+sockseek's own message. For any other refusal the app looks at the server once, after sockseek
+has stopped: one connection to `server.slsknet.org:2242` that sends nothing. A server that hangs up
+at once means Soulseek is blocking this network (it bans a network for a while after too many
+logins from it), no connection means the server can't be reached, and a server that waits for
+the login means the account itself was refused. The page shows the set's last failed Soulseek job
+above its tracks. `SETDL_SOULSEEK_SERVER=host:port` points the check elsewhere; empty turns it off
+(the tests do, and use fake servers).
+
+1. `fallback`: `tl2mixxx fallback --missing --auto`. Each missing track is looked for on YouTube
+   Music, YouTube and SoundCloud; a result that surely is the track is downloaded (lossy, about
+   128 to 160 kbps), saved in the set's format, tagged, and kept as the track's fix
+   (`source: "youtube"` or `"soundcloud"`). Only when tracks are missing and `"youtube"` is on.
+2. `cut`: `tl2mixxx cut --missing`. What is still missing, and the IDs, are cut out of the set's
+   recording, each from its time to the next track's (`source: "mix"`, files named
+   "Artist - Title (from the mix)"). A recording that's a link is downloaded once, into tl2mixxx's
+   cache. Only when `"mix"` is on, the set has a `recording` and a missing track or ID has a time.
+3. `finish`: `tl2mixxx finish --all`: every file converted to the set's `format`, and with `tags`,
+   tagged. Only when `format` isn't `"keep"` or `tags` is on.
+
+The steps use the settings from when the download was asked for. Stopping any of them stops the
+rest. YouTube jobs (`fallback`, `cut`) run in a lane of their own: beside a Soulseek
+job, but one at a time among themselves. They don't need the Soulseek login.
+
+A file from YouTube or the recording is a stand-in: tl2mixxx keeps it as the track's fix, so a
+retry doesn't look for that track on Soulseek again. Undo the fix to look again.
 
 ---
 
@@ -466,6 +653,9 @@ comes first.
       "title": "DJ Example @ Warehouse Project, Manchester 2026-10-01",
       "url": "https://www.1001tracklists.com/tracklist/abc123/dj-example-warehouse.html",
       "source": "page",
+      "kind": "1001tracklists",
+      "recording": "",
+      "cues": 2,
       "folder": "/Users/you/Music/1001Tracklists/DJ Example @ Warehouse Project, Manchester 2026-10-01",
       "m3u": "/Users/you/Music/1001Tracklists/DJ Example @ .../DJ Example @ ....m3u8",
       "mashups": "components",
@@ -486,6 +676,11 @@ comes first.
 | `id` | Use it in `/api/sets/{set}` (URL-encoded) and in `POST /api/downloads` |
 | `name` | The folder's name (same as `id`) |
 | `title` | The set's name from its page |
+| `url` | The page the list came from: a 1001Tracklists page, the YouTube video, the Spotify playlist... |
+| `source` | `"page"`, `"text"` or `"resolved"`: which copy the set keeps (`_tracklist.html`, `.txt`, `.json`) |
+| `kind` | Where the tracklist came from, as in a [draft](#the-draft-object). The UI names the link after it ("1001Tracklists page", "YouTube video", "Spotify") |
+| `recording` | The set's recording, or `""`: with it, tracks with a time can be cut out of it |
+| `cues` | How many rows have a time |
 | `m3u` | The playlist, or `""` before the first download finishes |
 | `downloaded` | sockseek has run for it at least once |
 | `found` / `missing` / `total` | Tracks with a file, without one, and all of them, under the set's mashups choice. IDs without a file aren't counted |
@@ -546,17 +741,19 @@ Every row of the page is listed. Track fields:
 | `reason` | Why it's missing, e.g. `"no search results"`, `"not found on Soulseek"`, `"your file is gone: x.wav"` |
 | `search` | What the set's search looks for: the starting text for "Search Soulseek for" |
 | `identity` | Send it as `identity` when fixing this track |
-| `fix` | `null`, or what the user fixed: `query` (another search), `file`, `source` (`"soulseek"` or `"own"`), `link`, `updated`. Only the keys that have a value are present |
+| `fix` | `null`, or what the user fixed: `query` (another search), `file`, `source` (`"soulseek"`, `"own"`, `"youtube"`, `"soundcloud"` or `"mix"`), `link` (the slsk:// link, the video, or `"<recording>#t=<start>,<end>"` for a cut), `updated`. Only the keys that have a value are present |
 | `fix_in_use` | The file in use is the one the fix gave it |
 | `retry_query` | What a retry searches for instead of `search` (`""` = its own search) |
 
 Status wording, as the Mixxx fork's Fix Tracks dialog words it. Check these in order:
 
+Set Downloader names where a found track's file came from instead of "Found":
+
 | Condition | Status text |
 |---|---|
-| `status == "found"` and `fix_in_use` | "Your file" (`fix.source == "own"`) or "Picked on Soulseek" |
+| `status == "found"` and `fix_in_use` | By `fix.source`: "Soulseek" (picked), "YouTube (lossy)", "SoundCloud", "Cut from the mix", "Your file" |
 | `status == "found"` and `fix.file` | "Found, but {reason}" (the fix's file is gone; a download stands in) |
-| `status == "found"` | "Found" |
+| `status == "found"` | "Soulseek" (the set's own download) |
 | `status == "missing"` | "Missing: {reason}", plus ` (retries search for "{retry_query}")` when `retry_query` isn't empty |
 | `status == "skipped"` | "Not searched (ID)" |
 
@@ -564,7 +761,10 @@ The dialog's default view is "Missing and Fixed Tracks": rows that are `selectab
 missing, skipped or have a `fix`. Its other view is "All Tracks". When nothing is missing, it starts
 on "All Tracks".
 
-Its summary line is "{found} of {found+missing} tracks have a file. Pick a track to search Soulseek
+The set's header sums it up by source: "28 Soulseek, 4 YouTube, 2 from the mix, 3 missing"
+(SoundCloud counts as YouTube there).
+
+The Mixxx fork's summary line is "{found} of {found+missing} tracks have a file. Pick a track to search Soulseek
 with other words and choose the file yourself, or to use a file of your own. This also replaces a
 wrong version." When nothing is missing: "All {found} tracks have a file. Pick a track to replace a
 wrong version."
@@ -644,14 +844,18 @@ The body always has the track's `identity` (from its tracks) and one of the foll
 | Body | What it does | Soulseek queue? |
 |---|---|---|
 | `{"identity": "...", "link": "slsk://...", "query": "Kettle - Ghosts"}` | Download a picked search result and use it. Send the `query` of the search that found it (`job.result.query`): it is kept for retries | yes |
-| `{"identity": "...", "query": "Saltmarsh Pressure VIP"}` | Search again with other words and download the best match. If nothing is found, the query is kept, so retrying the set searches for it this way | yes |
+| `{"identity": "...", "link": "https://www.youtube.com/watch?v=...", "query": "..."}` | Download a result picked from [Find on YouTube](#find-on-youtube-cut-from-the-set-finish-files) (its `link` and `query`): its audio, in the set's format, tagged, kept as the fix with `source` `"youtube"` or `"soundcloud"`. YouTube and SoundCloud links only | no: the YouTube lane |
+| `{"identity": "...", "query": "Saltmarsh Pressure VIP"}` | Search again with other words and download the best match. If nothing is found, the query is kept, so retrying the set searches for it this way; a file the track has (a YouTube or cut stand-in) stays its file | yes |
 | `{"identity": "...", "upload": "<upload id>"}` | Use the user's own file (see [Uploads](#uploads-the-users-own-audio-file)). It is copied into the set's folder, and the upload is used up | no |
 | `{"identity": "...", "clear": true}` | Undo the fix: back to what the set's search found. The files stay in the folder | no |
 
 The response is `202 {"job": {...}}`, a `fix` job with `set` and `row`.
 
-- Soulseek fixes wait in the Soulseek queue.
+- Soulseek fixes wait in the Soulseek queue; a picked video waits in the YouTube lane (no login
+  needed). Its title ends with ": download the picked video" (or "track", for SoundCloud).
 - The others start right away.
+- When the settings convert files or write tags, a fix that worked (not an undo, not a picked
+  video, which is saved finished) is followed by a `finish` job for that row.
 - Either kind waits (`waiting: "set"`) while another job is busy with the same set, such as its
   download.
 
@@ -676,13 +880,106 @@ Its hint: "Nothing right? Leave it missing."
 | 400 | `bad_row` | Row 0, over 100000, or "The set has no row N." |
 | 400 | `bad_identity` | Missing `identity` |
 | 400 | `bad_fix` | Not exactly one of link/query, upload, clear; or `clear` isn't `true` |
-| 400 | `bad_link` | `link` isn't an `slsk://` link |
+| 400 | `bad_link` | `link` isn't an `slsk://` link, or a YouTube or SoundCloud link |
 | 400 | `bad_query` | As for searches |
 | 403 / 404 | | As for `GET /api/sets/{set}` |
 | 404 | `no_upload` | No such upload (or it was used already) |
 | 409 | `login_required`, `sockseek_missing` | Link and query fixes only |
 
 A path that isn't a number (`/tracks/abc/fix`) is a plain `404 not_found`.
+
+---
+
+## Find on YouTube, cut from the set, finish files
+
+### `POST /api/sets/{set}/tracks/{row}/fallback`
+
+```json
+{"identity": "kettle|ghosts"}
+```
+
+Find on YouTube: `tl2mixxx fallback --track ROW` looks on YouTube Music, YouTube and SoundCloud
+(two searches, the most precise first) and scores every result like a likely file. Nothing is
+downloaded. It's a `fallback` job with `row` set, in the YouTube lane (no login, beside Soulseek).
+Its `result`:
+
+```json
+{"version": 1, "folder": "...", "set": "...", "source": "any", "errors": [], "stopped": false,
+ "tracks": [{"row": 5, "identity": "kettle|ghosts", "display": "Kettle - Ghosts",
+   "queries": [{"query": "Kettle - Ghosts", "results": 8, "failed": false}],
+   "candidates": [{"name": "Kettle - Ghosts", "link": "https://www.youtube.com/watch?v=...", "source": "youtube",
+     "uploader": "Kettle", "official": true, "length": 301, "format": "opus", "bitrate": 160,
+     "quality": "lossy, 160 kbps opus", "thumbnail": "https://i.ytimg.com/...", "score": 0.97,
+     "confidence": "high", "reasons": ["title matches", "artist matches", "official upload", "lossy, 160 kbps opus"],
+     "substitute": false, "query": "Kettle - Ghosts", "user": "Kettle", "size": 0, "free_slot": true, ...}],
+   "taken": null}]}
+```
+
+Candidates have a Soulseek result's keys (so the same list shows them) plus `source`, `uploader`,
+`official` (YouTube Music songs and "Artist - Topic" channels), `quality` and `thumbnail`.
+`confidence` and `reasons` are as for likely matches; "slowed", "reaction", a 15-minute "track" and
+so on make it `low`. To use one: [fix](#fixing-a-track) with its `link` and `query`.
+
+The job's `message`: "{n} result(s) on YouTube and SoundCloud, {k} that surely are the track." or
+"Nothing found on YouTube or SoundCloud."
+
+| Status | code | When |
+|---|---|---|
+| 400 | `bad_row`, `bad_identity` | As for fixes; also an ID (no name to look for) |
+| 403 / 404 | | As for `GET /api/sets/{set}` |
+
+A row that holds another track now ends the job as `failed` ("not the track you chose").
+
+### `POST /api/sets/{set}/tracks/{row}/cut`
+
+```json
+{"identity": "kettle|ghosts"}
+```
+
+Cuts the track out of the set's recording, from its time to the next track's (the last one to the
+end): `tl2mixxx cut --track ROW`, a `cut` job with `row` set. The file is saved in the set's
+format, tagged, and kept as the fix (`source: "mix"`). A recording that's a link is downloaded
+once (into tl2mixxx's cache), in the YouTube lane. Its `result`:
+
+```json
+{"version": 1, "folder": "...", "set": "...", "recording": {"source": "https://...", "file": "/.../recordings/3f2a.opus", "duration": 3900.0},
+ "tracks": [{"row": 5, "identity": "...", "display": "Kettle - Ghosts", "start": 0.0, "end": 271.0,
+             "file": "/.../Kettle - Ghosts (from the mix).opus", "skipped": null}],
+ "errors": [], "stopped": false}
+```
+
+`skipped` says why a track wasn't cut ("no cue time...", "only 3 s until the next track"). The
+job's `message`: "Cut {n} track(s) out of the set's recording." Show the button only when the set
+has a `recording` and the track a `cue`.
+
+| Status | code | When |
+|---|---|---|
+| 400 | `bad_row`, `bad_identity` | As for fixes |
+| 409 | `no_recording` | The set has no recording |
+| 409 | `no_cue` | The tracklist doesn't say when this track plays |
+
+### `POST /api/sets/{set}/finish`
+
+Converts every file of the set to the settings' `format` and, with `tags`, writes their tags
+(`tl2mixxx finish --all`): for a set downloaded before the settings changed. A `finish` job; asking
+again while one runs answers that one. Its `result`:
+
+```json
+{"version": 1, "folder": "...", "set": "...", "format": "aiff", "tags": true, "errors": [], "stopped": false,
+ "files": [{"row": 1, "display": "...", "file": "/.../x.aiff", "converted": true, "tagged": true,
+            "old_file": "/.../x.flac", "note": "was mp3 (lossy): converting doesn't make it lossless"}]}
+```
+
+The job's `message`: "Converted {n} file(s) to AIFF, tagged {k}." or "The files were finished
+already." Converting rewrites sockseek's index, the fixes and the playlist, then removes the old
+file; a playlist already imported into Mixxx still points at the old names.
+
+| Status | code | When |
+|---|---|---|
+| 409 | `nothing_to_finish` | `format` is `"keep"` and `tags` is off |
+
+Buy links: the fix panel also links to a Bandcamp search (`https://bandcamp.com/search?q=...&item_type=t`)
+and a Beatport search (`https://www.beatport.com/search?q=...`), opened with `POST /api/open-url`.
 
 ---
 
@@ -716,13 +1013,58 @@ The response is `200 {"ok": true}`, or `404 no_upload`.
 
 ---
 
+## yt-dlp
+
+tl2mixxx reads YouTube, SoundCloud and Mixcloud with yt-dlp, used as a library. The app has one
+built in; `state.ytdlp` says which is in use:
+
+| Field | Meaning |
+|---|---|
+| `version` | The version tl2mixxx imports, or `null` (not installed, or still being read) |
+| `source` | `"updated"` (downloaded with Update yt-dlp), `"bundled"` (built in), or `null` (none) |
+| `bundled` | The built-in one's version |
+| `updated` | When the update in use was downloaded |
+| `updating`, `step` | An update is running, and what it's doing ("Downloading yt-dlp 2026.11.02") |
+| `message`, `error` | How the last update ended: "Updated to yt-dlp 2026.11.02.", "Already up to date: ...", or why it failed |
+
+### `POST /api/ytdlp/update`
+
+Starts updating in the background and answers `202 {"ytdlp": {...}}` at once (`updating: true`).
+A `state` event comes as it goes and when it ends. It:
+
+1. asks GitHub for yt-dlp's latest release (`api.github.com/repos/yt-dlp/yt-dlp/releases/latest`);
+2. stops there if that's the version in use;
+3. downloads the release's `yt-dlp` file (the library as a zip, which also runs as a program) and
+   its `SHA2-256SUMS`, over HTTPS from GitHub only (redirects checked), at most 40 MB;
+4. checks the checksum and that it is the library;
+5. has a child process import it and report its version;
+6. keeps it in `<data dir>/yt-dlp/` and removes older ones.
+
+From then on every tl2mixxx process imports it before the built-in copy. Asking while an update
+runs changes nothing.
+
+### `DELETE /api/ytdlp/update`
+
+Forgets the update: the built-in yt-dlp is used again. `200 {"ytdlp": {...}}`, or
+`409 ytdlp_updating` while an update runs.
+
+---
+
 ## Jobs
 
-Downloads, searches and fixes are jobs. Each one is a tl2mixxx process; its output is the job's log.
+Downloads, searches, fixes and the rest are jobs. Each one is a tl2mixxx process (or one of the
+app's helpers); its output is the job's log.
 
-Soulseek jobs (`download`, `search`, and fixes with `link`/`query`) run **one at a time**, in the
-order they were asked for: one Soulseek login can only be logged in once. Other fixes start right
-away. No two jobs work on the same set at once.
+Jobs run in lanes:
+
+- **Soulseek** (`download`, `search`, `suggest`, and fixes with an `slsk://` link or a query): **one
+  at a time**, in the order they were asked for: one Soulseek login can only be logged in once.
+- **YouTube** (`fallback`, `cut`, a fix with a picked video): one at a time among themselves,
+  beside the Soulseek lane. No login.
+- The rest (`resolve`, `finish`, fixes with an upload or undo) start right away.
+
+No two jobs change the same set's files at once. A queued job waiting for its set (`waiting:
+"set"`) doesn't hold up its lane: the jobs behind it for other sets start first.
 
 ### The job object
 
@@ -756,13 +1098,15 @@ away. No two jobs work on the same set at once.
 
 | Field | Meaning |
 |---|---|
-| `kind` | `"download"`, `"search"` or `"fix"` |
-| `title` | What to show. A download: the set's name. A search: `Search: "query"`. A fix: `Kettle - Ghosts: download the picked file` / `search again for "..."` / `use x.wav` / `undo the fix` |
-| `set` | The set it works on (`null` for searches) |
-| `row` | A fix's track row (else `null`) |
+| `kind` | `"download"`, `"search"`, `"fix"`, `"suggest"`, `"resolve"` (reading a link), `"fallback"` (YouTube), `"cut"` (from the recording) or `"finish"` (converting and tagging) |
+| `title` | What to show. A download and the steps after it: the set's name. A search: `Search: "query"`. A fix: `Kettle - Ghosts: download the picked file` / `download the picked video` / `search again for "..."` / `use x.wav` / `undo the fix`. A link: `Reading the YouTube video`. A track's: `Kettle - Ghosts: find on YouTube` / `cut from the set` / `finish` |
+| `set` | The set it works on (`null` for searches and links) |
+| `row` | The track's row, for a fix and a track's fallback, cut or finish (else `null`: the set's download and its steps) |
+| `lane` | `"soulseek"`, `"youtube"` or `null` (started right away) |
 | `state` | `queued` → `running` → `done` / `failed` / `stopped`. In between there may be `stopping` (Stop was pressed; tl2mixxx is wrapping up) |
-| `waiting` | While `queued`: `"soulseek"` (behind another Soulseek job) or `"set"` (another job is busy with this set) |
-| `ahead` | While waiting in the Soulseek queue: how many Soulseek jobs run before it, the running one included. Otherwise `null` |
+| `waiting` | While `queued`: `"soulseek"` or `"youtube"` (behind another job of its lane) or `"set"` (another job is busy with this set) |
+| `ahead` | While waiting in its lane: how many jobs of the lane run before it, the running one included. Otherwise `null` |
+| `progress` | While it runs, when tl2mixxx says how far it is: `{"fraction": 0.42, "text": "downloading Kettle - Ghosts"}` (from its `PROGRESS` lines, which aren't in the log). Otherwise `null` |
 | `exit_code` | tl2mixxx's exit code: 0 = fine, 130 = stopped, 1 = errors, negative = killed by a signal |
 | `message` | A one-line summary to show when it ends (see below) |
 | `error` | The last error tl2mixxx reported (`"ERROR kind: text"` lines), or `""` |
@@ -780,7 +1124,10 @@ away. No two jobs work on the same set at once.
 | `missing_tracks` | `{number, artist, title, reason}` for each track without a file (`number` is `""` for a mashup's parts) |
 
 `result` for searches is `{"query": "...", "results": [...]}` (see [Searching Soulseek](#searching-soulseek)),
-or `null` if the search failed or was stopped.
+or `null` if the search failed or was stopped. For `resolve`, see
+[Paste anything](#post-apidraftsresolve); for `fallback`, `cut` and `finish`, see
+[Find on YouTube, cut, finish](#find-on-youtube-cut-from-the-set-finish-files) (a set's
+`fallback --missing --auto` result is the same shape, with `taken` set for each track downloaded).
 
 `message` examples:
 
@@ -870,8 +1217,8 @@ Event types:
 | `hello` | `{}` | Right after connecting (no `id`) |
 | `job` | a job object (no log) | A job is queued, starts, starts waiting, moves up the queue, is stopping, or ends |
 | `log` | `{"job": "<id>", "n": 12, "line": "..."}` | A line of a job's output. `n` counts from 1 per job; the first line is the command |
-| `sets` | `{"set": "<set id>", "reason": "download"}` (or `"fix"`) | A download or fix of that set ended: its files changed. Refresh `GET /api/sets`, and the set's tracks if it is open |
-| `state` | the state object (as `GET /api/state`) | Settings or the login changed |
+| `sets` | `{"set": "<set id>", "reason": "download"}` (or `"fix"`, `"suggest"`, `"fallback"`, `"cut"`, `"finish"`) | A job that changes that set's files ended. Refresh `GET /api/sets`, and the set's tracks if it is open |
+| `state` | the state object (as `GET /api/state`) | Settings, the login or yt-dlp's status changed |
 
 Every event except `hello` has an increasing `id`. The server keeps the last 2000 events for
 replay. A `: ping` comment comes every 15 seconds, and `retry: 2000` asks for reconnects after 2
@@ -949,15 +1296,33 @@ Prevent the browser's own drop handling, or WKWebView opens the file:
 7. When the fix job ends (`job` event with `state` done/failed, plus a `sets` event), reload the
    tracks and show the job's `message`.
 
+**Paste anything**
+
+1. `POST /api/drafts/resolve {input}`. A `201` has the draft; a `202` has a `resolve` job.
+2. Follow the job (`job` events). Show what's being read and a Stop button.
+3. `done`: `GET /api/drafts/{result.draft}`. `failed`: show `message`, and `result.help` for
+   Spotify with an Exportify button.
+4. Show the draft with where it came from (`kind`, `from`, `origin`) and, when there are
+   `alternatives`, a switcher: `POST /api/drafts/{id}/pick {pick}`.
+
 **Retry missing**
 
-`POST /api/downloads {set}`.
+`POST /api/downloads {set}`: Soulseek (if on), then YouTube, the recording and finishing, as the
+settings say.
+
+**A track from YouTube**
+
+1. `POST /api/sets/{set}/tracks/{row}/fallback {identity}`, wait for the job.
+2. Show `result.tracks[0].candidates` with their confidence and reasons.
+3. Download selected: `POST .../tracks/{row}/fix {identity, link, query}` with the candidate's.
 
 ---
 
 ## Developing the UI
 
-Run the backend in dev mode against scratch folders with the fake sockseek:
+Run the backend in dev mode against scratch folders with the fake sockseek (with YouTube on in
+the settings, a download then looks on the real YouTube for what's missing: turn it off, or see
+below):
 
 ```sh
 cd /Users/evanegan/Downloads/set-downloader
@@ -986,6 +1351,31 @@ export default {server: {proxy: {"/api": {target: "http://127.0.0.1:8765", chang
 
 Open the printed `http://localhost:5173/#token=…` address. `--dev-origin` lets the server accept
 that origin. Without it, the server only accepts its own.
+
+To work on the YouTube and recording parts without the network, run the app with
+`tests/fake_tl2mixxx.py` as tl2mixxx: it fakes yt-dlp's searches and downloads (ffmpeg sine tones),
+reading a video (`tests/fixtures/ytdlp_video.json`) and Spotify, and writes no covers:
+
+```python
+# dev.py: python dev.py /tmp/setdl-dev
+import os, sys
+from setdl.core import App
+from setdl.server import Server
+os.environ |= {"SETDL_MIXXX_LOGIN": "/nonexistent", "TL2MIXXX_CACHE_DIR": f"{sys.argv[1]}/cache"}
+fake = ["/path/to/set-downloader/.venv/bin/python", "/path/to/set-downloader/tests/fake_tl2mixxx.py"]
+app = App(f"{sys.argv[1]}/data", music_dir=f"{sys.argv[1]}/music", sockseek="/path/to/fake/sockseek",
+          command=fake, helper_command=fake + ["--helper"])
+server = Server(app, port=8765, token="dev")
+print(server.page_url())
+server.serve_forever()
+```
+
+| Variable | Effect on the fake tl2mixxx |
+|---|---|
+| `FAKE_YTDL_MISSING="Baby"` | Searches with that word find nothing on YouTube |
+| `FAKE_YTDL_FAIL=1` | Downloads from YouTube fail |
+| `FAKE_YTDL_DELAY=3`, `FAKE_EXTRACT_DELAY=3` | Each download / reading a link takes that many seconds |
+| `FAKE_SPOTIFY_FAIL=1` | Spotify links can't be read (also any link with "unreadable" in it) |
 
 `npm run build` into `web/dist`. The server serves it at `/`: any path without a file extension
 gets `index.html`, so client-side routes work. Until `web/dist/index.html` exists, a placeholder

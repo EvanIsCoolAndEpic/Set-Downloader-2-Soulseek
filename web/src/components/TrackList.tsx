@@ -14,7 +14,7 @@ interface Props {
   selectedRow: number | null;
   onSelect: (row: number) => void;
   onOpen: (row: number) => void;
-  /** Fix jobs that are queued or running, by row. */
+  /** Jobs changing a track's file (fixes, cuts, conversions) that are queued or running, by row. */
   working: Map<number, Job>;
   emptyText?: string;
 }
@@ -97,7 +97,8 @@ const FIX_WORDS = { undo: "Undoing", pick: "Downloading", search: "Searching", o
 
 function workingStatus(job: Job): StatusText & { queued: boolean } {
   const queued = job.state === "queued";
-  const label = queued ? "Queued" : job.state === "stopping" ? "Stopping" : FIX_WORDS[fixAction(job.title)];
+  const doing = job.kind === "cut" ? "Cutting" : job.kind === "finish" ? "Converting" : FIX_WORDS[fixAction(job.title)];
+  const label = queued ? "Queued" : job.state === "stopping" ? "Stopping" : doing;
   return { tone: "work", label, detail: "", full: `${label}: ${job.title}`, queued };
 }
 

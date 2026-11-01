@@ -266,6 +266,23 @@
   animation: indeterminate 1.3s var(--ease-out) infinite;
 }
 
+/* How far a job is, when tl2mixxx says ("PROGRESS" lines): the same hairline, filled */
+.meter {
+  position: relative;
+  overflow: hidden;
+  height: 2px;
+  border-radius: 1px;
+  background: color-mix(in oklab, var(--accent) 22%, transparent);
+}
+.meter > span {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transform-origin: left;
+  transition: transform 300ms var(--ease-out);
+}
+
 /* Skeleton rows: a still placeholder in the shape of what is loading (no shimmer loop) */
 .skeleton {
   background: color-mix(in oklab, var(--fg) 8%, transparent);

@@ -25,10 +25,12 @@ def test_multi_call_runs_tl2mixxx(tmp_path):
 
 def test_tl2mixxx_command(monkeypatch):
     cmd = paths.tl2mixxx_command()
-    assert cmd[0] == sys.executable and cmd[-2:] == ["-m", "tl2mixxx"] and "-I" in cmd
+    assert cmd[0] == sys.executable and cmd[-3:] == ["-m", "setdl", "--tl2mixxx"] and "-I" in cmd
+    assert paths.helper_command()[-1] == "--helper"
     # The built app runs itself
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     assert paths.tl2mixxx_command() == [sys.executable, "--tl2mixxx"]
+    assert paths.helper_command() == [sys.executable, "--helper"]
 
 
 def test_bundled_sockseek_in_the_app(monkeypatch, tmp_path):
@@ -73,7 +75,8 @@ def test_settings(client, tmp_path):
     assert state["music_dir"]["exists"] is False and state["limits"]["upload_bytes"] > 0
     new = tmp_path / "elsewhere"
     state = client.ok("PUT", "/api/settings", {"music_dir": str(new), "mashups": "both", "sockseek": ""})
-    assert state["settings"] == {"music_dir": str(new), "sockseek": "", "mashups": "both"}
+    assert state["settings"] == {"music_dir": str(new), "sockseek": "", "mashups": "both", "sources": ["soulseek"],
+                                 "quality": "best", "format": "keep", "tags": False}
     assert state["sockseek"]["found"] is False
     saved = (tmp_path / "data" / "settings.json").read_text()
     assert str(new) in saved
