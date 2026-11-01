@@ -8,6 +8,22 @@ retry what's missing and fix single tracks: search again, pick a result, or use 
 the window around them: a Python backend (`setdl/`) serving a web UI (`web/`) in a pywebview window.
 The API is described in [API.md](API.md).
 
+## Run
+
+Open `dist/Set Downloader.app` (build it with `scripts/build-app.sh`). It has Python, tl2mixxx and
+sockseek inside, so it runs from anywhere: drag it to Applications if you like. `./run.sh` starts it
+from the source folder instead.
+
+## Build
+
+```sh
+scripts/build-app.sh      # web UI, then PyInstaller into dist/Set Downloader.app, then sockseek
+```
+
+sockseek comes from `../tl2mixxx/dist/1001tracklists-tools/sockseek` (`SOCKSEEK=<path>` picks
+another). The app looks for sockseek in this order: the path in Settings, one on your PATH, the one
+inside the app.
+
 ## Develop
 
 ```sh

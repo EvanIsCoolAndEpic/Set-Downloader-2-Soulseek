@@ -17,6 +17,7 @@ import mimetypes
 import queue
 import re
 import secrets
+import socketserver
 import sys
 import threading
 import traceback
@@ -106,6 +107,14 @@ class Server(ThreadingHTTPServer):
         self.hosts = {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
         self.origins = {f"http://{h}" for h in self.hosts} | self.dev_origins
         self.closing = threading.Event()
+
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind looks up the host's name (socket.getfqdn), which can hang on an
+        # mDNS lookup for seconds or for good: the name is never used, so it's skipped
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
     @property
     def url(self) -> str:
