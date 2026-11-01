@@ -264,3 +264,11 @@ def test_sockseek_missing(client, app):
     status, data = client.post("/api/searches", {"query": "x"})
     assert status == 409 and data["error"]["code"] == "sockseek_missing"
     assert client.ok("GET", "/api/state")["sockseek"]["found"] is False
+
+
+def test_a_refused_login_stops_the_download_and_says_why(client, monkeypatch):
+    client.login()
+    monkeypatch.setenv("FAKE_SOCKSEEK_LOGIN_REFUSED", "1")
+    job = client.wait_job(client.download(draft=client.draft()["id"])["id"], timeout=30)
+    assert job["state"] == "failed"
+    assert "isn't letting this account log in" in job["message"]

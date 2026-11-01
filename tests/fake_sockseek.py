@@ -50,6 +50,12 @@ def main(argv):
     missing = set(filter(None, os.environ.get("FAKE_SOCKSEEK_MISSING", "").split("|")))
     with open(os.environ.get("FAKE_SOCKSEEK_LOG", os.devnull), "a") as log:
         log.write(" ".join(argv) + "\n")
+    if os.environ.get("FAKE_SOCKSEEK_LOGIN_REFUSED"):
+        # Like Soulseek refusing the login: sockseek says so and tries again, for ever
+        while True:
+            print("[error] [soulseek] Failed to ensure Soulseek connection and login: System.TimeoutException",
+                  file=sys.stderr, flush=True)
+            time.sleep(0.2)
 
     if opts.get("--print") == "json-all" and opts.get("--input-type") == "csv":
         # Several searches in one run (a CSV of titles): one line of results each, in order

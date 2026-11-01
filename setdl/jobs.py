@@ -43,6 +43,12 @@ def iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds") if ts else None
 
 
+# What sockseek logs when Soulseek won't let it log in
+LOGIN_FAILED = ("Failed to ensure Soulseek connection and login", "Soulseek login failed")
+LOGIN_REFUSED = ("Soulseek isn't letting this account log in right now. It does that after many logins in a "
+                 "short time: try again in a while. If it keeps happening, check the login in Settings.")
+WRONG_LOGIN = "Soulseek says the username or password is wrong. Check the login in Settings."
+
 class EventBus:
     """Events for the page (Server-Sent Events): numbered, and the last ones kept so a page that
     reconnects with Last-Event-ID gets what it missed."""
@@ -118,6 +124,7 @@ class Job:
     log: deque = field(default_factory=lambda: deque(maxlen=MAX_LOG_LINES))
     lines: int = 0
     stop_requested: bool = False
+    login_failures: int = 0         # sockseek's "login failed" lines (see _line)
     proc: subprocess.Popen | None = field(default=None, repr=False)
 
     def to_dict(self, ahead: int | None = None, log: bool = False) -> dict:
@@ -336,6 +343,8 @@ class JobManager:
         else:
             state = STOPPED if job.stop_requested else DONE if code == 0 else FAILED
             message, result = "", None
+        if job.login_failures >= 2:
+            state, message = FAILED, job.error
         self._finish(job, state, message, result, code)
 
     def _pump(self, job: Job, proc: subprocess.Popen) -> None:
@@ -354,6 +363,13 @@ class JobManager:
         if text.startswith("ERROR "):
             # "ERROR <kind>: <text>"
             job.error = text.split(": ", 1)[1] if ": " in text else text[6:]
+        elif any(p in text for p in LOGIN_FAILED):
+            # sockseek retries a refused login for every track, for ever: give up and say why
+            job.login_failures += 1
+            if job.login_failures == 2:
+                wrong = any(p in text.lower() for p in ("invalidpass", "invalid password", "invalid username"))
+                job.error = WRONG_LOGIN if wrong else LOGIN_REFUSED
+                threading.Thread(target=self.stop, args=(job.id,), name="stop", daemon=True).start()
         with self._lock:
             job.log.append(text)
             job.lines += 1
